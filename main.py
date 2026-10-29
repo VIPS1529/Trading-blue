@@ -2,7 +2,7 @@ import asyncio
 import aiohttp
 import os
 from datetime import datetime
-from fastapi import FastAPI
+from fastapi import FastAPI, Response
 
 app = FastAPI()
 
@@ -60,9 +60,10 @@ logger = CloudDeskLogger()
 
 
 # ==========================================
-# FASTAPI ROUTES (For Render & UptimeRobot)
+# FASTAPI ROUTES (Fixed for GET, HEAD & UptimeRobot)
 # ==========================================
 @app.get("/")
+@app.head("/")
 def home():
     return {
         "status": "Online",
