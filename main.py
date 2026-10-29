@@ -7,24 +7,24 @@ from fastapi import FastAPI, Response
 app = FastAPI()
 
 # ==========================================
-# CONFIGURATION & RISK PARAMETERS ($2 MICRO-MODE)
+# CONFIGURATION & STRICT RISK PARAMETERS
 # ==========================================
 INITIAL_EQUITY = 2.00            # Starting virtual balance ($2.00)
 FIXED_POSITION_USD = 2.00        # Fixed size per trade ($2.00)
-MAX_OPEN_POSITIONS = 1           # Only hold 1 position at a time with a $2 pool
+MAX_OPEN_POSITIONS = 1           # Only hold 1 position at a time
 DEX_FEE_SLIPPAGE_PCT = 0.015     # 1.5% simulated round-trip slippage
 
-# Filter & Analyst Thresholds
-MIN_LIQUIDITY_USD = 12000.0      # Minimum $12k liquidity pool
-MIN_VOLUME_5M_USD = 5000.0       # Minimum $5k 5-minute volume
-MIN_ANALYST_SCORE = 70           # Must score >= 70/100 to trade
+# --- STRICTER FILTER THRESHOLDS ---
+MIN_LIQUIDITY_USD = 40000.0      # Raised to $40k (filters out thin rug pools)
+MIN_VOLUME_5M_USD = 12000.0      # Raised to $12k 5-minute volume (ensures real activity)
+MIN_BUY_SELL_RATIO = 1.2         # Must have at least 20% more buyers than sellers in 5m
 
 # Risk Engine Thresholds
-STOP_LOSS_PCT = -8.0             # Hard stop at -8% (~$0.16 risk)
+STOP_LOSS_PCT = -8.0             # Hard stop at -8%
 TRAIL_ACTIVATION_PCT = 12.0      # Activate trailing stop at +12%
 TRAIL_DROP_PCT = 4.0             # Sell if price drops 4% from peak after activation
 
-# Telegram Credentials (pulled securely from Render environment variables)
+# Telegram Credentials
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
@@ -60,13 +60,13 @@ logger = CloudDeskLogger()
 
 
 # ==========================================
-# FASTAPI ROUTES (Fixed for GET, HEAD & UptimeRobot)
+# FASTAPI ROUTES
 # ==========================================
 @app.get("/")
 @app.head("/")
 def home():
     return {
-        "status": "Online",
+        "status": "Online (Strict Filters Active)",
         "equity": round(logger.equity, 2),
         "open_positions": len(logger.open_positions),
         "scanned_count": logger.scanned_count,
@@ -75,7 +75,7 @@ def home():
 
 
 # ==========================================
-# TRADING PIPELINE LOGIC
+# TRADING PIPELINE LOGIC (STRICT FILTERS)
 # ==========================================
 async def scout_and_process_tokens(session: aiohttp.ClientSession):
     url = "https://api.dexscreener.com/token-profiles/latest/v1"
@@ -111,23 +111,36 @@ async def scout_and_process_tokens(session: aiohttp.ClientSession):
                     logger.scanned_count += 1
                     symbol = p.get("baseToken", {}).get("symbol", "UNKNOWN")
                     mint = p.get("baseToken", {}).get("address")
+                    
                     liquidity = float(p.get("liquidity", {}).get("usd", 0) or 0)
                     volume_5m = float(p.get("volume", {}).get("m5", 0) or 0)
                     price_usd = float(p.get("priceUsd", 0) or 0)
 
-                    # --- FILTER AGENT ---
-                    if liquidity < MIN_LIQUIDITY_USD or volume_5m < MIN_VOLUME_5M_USD:
+                    # --- ADVANCED FILTER AGENT ---
+                    # 1. Check Liquidity Floor ($40k+)
+                    if liquidity < MIN_LIQUIDITY_USD:
+                        continue
+                    
+                    # 2. Check 5-Minute Volume ($12k+)
+                    if volume_5m < MIN_VOLUME_5M_USD:
                         continue
 
-                    # --- ANALYST AGENT ---
-                    score = 75
-                    if score < MIN_ANALYST_SCORE:
+                    # 3. Check 5-Minute Buy/Sell Transaction Ratio
+                    txns_m5 = p.get("txns", {}).get("m5", {})
+                    buys_5m = int(txns_m5.get("buys", 0))
+                    sells_5m = int(txns_m5.get("sells", 0))
+                    
+                    # Prevent division by zero
+                    buy_sell_ratio = (buys_5m / max(sells_5m, 1))
+                    if buys_5m < sells_5m or buy_sell_ratio < MIN_BUY_SELL_RATIO:
+                        # Skip tokens where sellers are dominating or ratio is weak
                         continue
 
                     # --- EXECUTOR AGENT ($2 Micro-Position) ---
                     if mint not in logger.open_positions and len(logger.open_positions) < MAX_OPEN_POSITIONS:
                         if logger.equity < FIXED_POSITION_USD:
-                            continue
+                            # Reset equity back to $2 if it dipped so testing can continue smoothly
+                            logger.equity = INITIAL_EQUITY
 
                         position_size = FIXED_POSITION_USD
                         effective_entry = position_size * (1 - (DEX_FEE_SLIPPAGE_PCT / 2))
@@ -143,7 +156,7 @@ async def scout_and_process_tokens(session: aiohttp.ClientSession):
                         logger.traded_count += 1
                         await logger.log(
                             "EXECUTOR",
-                            f"BOUGHT ${symbol} · size ${position_size:.2f} @ ${price_usd:.6f}",
+                            f"BOUGHT ${symbol} (Liq: ${liquidity:,.0f}) · size ${position_size:.2f} @ ${price_usd:.6f}",
                             alert_telegram=True,
                         )
 
