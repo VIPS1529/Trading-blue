@@ -3,6 +3,7 @@ import aiohttp
 import os
 from datetime import datetime
 from fastapi import FastAPI, Response
+from fastapi.responses import HTMLResponse
 
 app = FastAPI()
 
@@ -15,9 +16,9 @@ MAX_OPEN_POSITIONS = 1           # Only hold 1 position at a time
 DEX_FEE_SLIPPAGE_PCT = 0.015     # 1.5% simulated round-trip slippage
 
 # --- STRICTER FILTER THRESHOLDS ---
-MIN_LIQUIDITY_USD = 40000.0      # Raised to $40k (filters out thin rug pools)
-MIN_VOLUME_5M_USD = 12000.0      # Raised to $12k 5-minute volume (ensures real activity)
-MIN_BUY_SELL_RATIO = 1.2         # Must have at least 20% more buyers than sellers in 5m
+MIN_LIQUIDITY_USD = 40000.0      # Minimum $40k liquidity pool
+MIN_VOLUME_5M_USD = 12000.0      # Minimum $12k 5-minute volume
+MIN_BUY_SELL_RATIO = 1.2         # Must have at least 20% more buyers than sellers
 
 # Risk Engine Thresholds
 STOP_LOSS_PCT = -8.0             # Hard stop at -8%
@@ -30,7 +31,7 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
 
 # ==========================================
-# LOGGER & TELEGRAM HELPER
+# LOGGER & ACTIVITY FEED
 # ==========================================
 class CloudDeskLogger:
     def __init__(self):
@@ -38,10 +39,17 @@ class CloudDeskLogger:
         self.open_positions = {}
         self.scanned_count = 0
         self.traded_count = 0
+        self.activity_logs = []
 
     async def log(self, agent: str, message: str, alert_telegram: bool = False):
         timestamp = datetime.now().strftime("%H:%M:%S")
-        print(f"[{timestamp}] [{agent}] {message}")
+        log_entry = f"[{timestamp}] [{agent}] {message}"
+        print(log_entry)
+        
+        # Keep last 30 logs for the web dashboard view
+        self.activity_logs.insert(0, log_entry)
+        if len(self.activity_logs) > 30:
+            self.activity_logs.pop()
 
         if alert_telegram and TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
             await self.send_telegram(f"*{agent}*: {message}")
@@ -60,18 +68,61 @@ logger = CloudDeskLogger()
 
 
 # ==========================================
-# FASTAPI ROUTES
+# VISUAL DASHBOARD ROUTE (HTML / HEAD)
 # ==========================================
-@app.get("/")
+@app.get("/", response_class=HTMLResponse)
 @app.head("/")
-def home():
-    return {
-        "status": "Online (Strict Filters Active)",
-        "equity": round(logger.equity, 2),
-        "open_positions": len(logger.open_positions),
-        "scanned_count": logger.scanned_count,
-        "traded_count": logger.traded_count,
-    }
+def dashboard():
+    logs_html = "".join([f"<li>{log}</li>" for log in logger.activity_logs])
+    positions_html = ""
+    if logger.open_positions:
+        for mint, pos in logger.open_positions.items():
+            positions_html += f"<b>{pos['symbol']}</b> | Entry: ${pos['entry_price']:.6f} | Peak: ${pos['peak_price']:.6f}<br>"
+    else:
+        positions_html = "<i>No open positions. Scanning market...</i>"
+
+    html_content = f"""
+    <!DOCTYPE html>
+    html>
+    <head>
+        <title>Trading-blue Dashboard</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta http-equiv="refresh" content="10">
+        <style>
+            body {{ background-color: #0d1117; color: #c9d1d9; font-family: -apple-system, BlinkMacSystemFont, sans-serif; padding: 20px; margin: 0; }}
+            .card {{ background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 15px; margin-bottom: 15px; }}
+            h2 {{ color: #58a6ff; margin-top: 0; font-size: 20px; }}
+            .metric {{ font-size: 24px; font-weight: bold; color: #3fb950; }}
+            ul {{ padding-left: 20px; font-family: monospace; font-size: 13px; max-height: 250px; overflow-y: auto; }}
+            li {{ margin-bottom: 5px; border-bottom: 1px solid #21262d; padding-bottom: 3px; }}
+        </style>
+    </head>
+    <body>
+        <h2>⚡ Trading-blue: AI Agent Desk</h2>
+        
+        <div class="card">
+            <div>Virtual Equity Pool</div>
+            <div class="metric">${logger.equity:.2f}</div>
+        </div>
+
+        <div class="card">
+            <div>Bot Stats</div>
+            <div>Scanned: <b>{logger.scanned_count}</b> | Traded: <b>{logger.traded_count}</b></div>
+        </div>
+
+        <div class="card">
+            <div>Active Open Position</div>
+            <div>{positions_html}</div>
+        </div>
+
+        <div class="card">
+            <div>Live Activity Logs (Auto-refreshes every 10s)</div>
+            <ul>{logs_html if logs_html else "<li>Waiting for first market scan...</li>"}</ul>
+        </div>
+    </body>
+    </html>
+    """
+    return html_content
 
 
 # ==========================================
@@ -117,29 +168,22 @@ async def scout_and_process_tokens(session: aiohttp.ClientSession):
                     price_usd = float(p.get("priceUsd", 0) or 0)
 
                     # --- ADVANCED FILTER AGENT ---
-                    # 1. Check Liquidity Floor ($40k+)
                     if liquidity < MIN_LIQUIDITY_USD:
                         continue
-                    
-                    # 2. Check 5-Minute Volume ($12k+)
                     if volume_5m < MIN_VOLUME_5M_USD:
                         continue
 
-                    # 3. Check 5-Minute Buy/Sell Transaction Ratio
                     txns_m5 = p.get("txns", {}).get("m5", {})
                     buys_5m = int(txns_m5.get("buys", 0))
                     sells_5m = int(txns_m5.get("sells", 0))
-                    
-                    # Prevent division by zero
                     buy_sell_ratio = (buys_5m / max(sells_5m, 1))
+                    
                     if buys_5m < sells_5m or buy_sell_ratio < MIN_BUY_SELL_RATIO:
-                        # Skip tokens where sellers are dominating or ratio is weak
                         continue
 
                     # --- EXECUTOR AGENT ($2 Micro-Position) ---
                     if mint not in logger.open_positions and len(logger.open_positions) < MAX_OPEN_POSITIONS:
                         if logger.equity < FIXED_POSITION_USD:
-                            # Reset equity back to $2 if it dipped so testing can continue smoothly
                             logger.equity = INITIAL_EQUITY
 
                         position_size = FIXED_POSITION_USD
