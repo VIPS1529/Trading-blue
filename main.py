@@ -8,15 +8,15 @@ from fastapi.responses import HTMLResponse
 app = FastAPI()
 
 # ==========================================
-# CONFIGURATION & SMART FEEDBACK PARAMETERS
+# CONFIGURATION & $50 BANKROLL PARAMETERS
 # ==========================================
-INITIAL_EQUITY = 5.00            # Starting virtual balance ($5.00)
-FIXED_POSITION_USD = 5.00        # Fixed size per trade ($5.00)
+INITIAL_EQUITY = 50.00           # Starting virtual balance ($50.00)
+FIXED_POSITION_USD = 5.00        # Fixed size per trade ($5.00 per shot)
 MAX_OPEN_POSITIONS = 1           # Only hold 1 position at a time
 DEX_FEE_SLIPPAGE_PCT = 0.015     # 1.5% simulated round-trip slippage
 
 # --- SMART FEEDBACK FILTER THRESHOLDS ---
-MIN_LIQUIDITY_USD = 50000.0      # Lowered to $50k+ (captures healthy mid-caps)
+MIN_LIQUIDITY_USD = 50000.0      # $50k+ liquidity floor
 MIN_VOLUME_5M_USD = 12000.0      # $12k+ 5-minute volume
 MIN_BUY_SELL_RATIO = 1.2         # 20% more buyers than sellers
 BLACKLIST_COOLDOWN_HOURS = 4     # Only blacklist losers for 4 hours
@@ -80,7 +80,7 @@ def dashboard():
         for mint, pos in logger.open_positions.items():
             positions_html += f"<b>{pos['symbol']}</b> | Entry: ${pos['entry_price']:.6f} | Peak: ${pos['peak_price']:.6f}<br>"
     else:
-        positions_html = "<i>No open positions. Scanning $50k+ pools (Smart Feedback Mode)...</i>"
+        positions_html = "<i>No open positions. Scanning $50k+ pools ($50 Bankroll Mode)...</i>"
 
     html_content = f"""
     <!DOCTYPE html>
@@ -99,7 +99,7 @@ def dashboard():
         </style>
     </head>
     <body>
-        <h2>⚡ Trading-blue: Smart Sniper ($50k + Win/Loss Mode)</h2>
+        <h2>⚡ Trading-blue: $50 Bankroll Sniper Desk</h2>
         
         <div class="card">
             <div>Virtual Equity Pool</div>
@@ -127,7 +127,7 @@ def dashboard():
 
 
 # ==========================================
-# TRADING PIPELINE LOGIC ($50K + CONDITIONAL BLACKLIST)
+# TRADING PIPELINE LOGIC ($50 POOL + $5 POSITIONS)
 # ==========================================
 async def scout_and_process_tokens(session: aiohttp.ClientSession):
     url = "https://api.dexscreener.com/token-profiles/latest/v1"
@@ -158,7 +158,6 @@ async def scout_and_process_tokens(session: aiohttp.ClientSession):
                 pairs = data.get("pairs") or []
 
                 now = datetime.now()
-                # Clean expired loser-blacklisted tokens
                 logger.loser_blacklist = {m: exp for m, exp in logger.loser_blacklist.items() if exp > now}
 
                 for p in pairs:
@@ -168,7 +167,6 @@ async def scout_and_process_tokens(session: aiohttp.ClientSession):
                     symbol = p.get("baseToken", {}).get("symbol", "UNKNOWN")
                     mint = p.get("baseToken", {}).get("address")
                     
-                    # Skip if currently blacklisted for a past loss
                     if mint in logger.loser_blacklist:
                         continue
 
@@ -176,7 +174,7 @@ async def scout_and_process_tokens(session: aiohttp.ClientSession):
                     volume_5m = float(p.get("volume", {}).get("m5", 0) or 0)
                     price_usd = float(p.get("priceUsd", 0) or 0)
 
-                    # --- FILTERS ($50k Floor) ---
+                    # --- FILTERS ---
                     if liquidity < MIN_LIQUIDITY_USD:
                         continue
                     if volume_5m < MIN_VOLUME_5M_USD:
@@ -190,10 +188,11 @@ async def scout_and_process_tokens(session: aiohttp.ClientSession):
                     if buys_5m < sells_5m or buy_sell_ratio < MIN_BUY_SELL_RATIO:
                         continue
 
-                    # --- EXECUTOR AGENT ($5.00 Position) ---
+                    # --- EXECUTOR AGENT ($5.00 Risk per Trade) ---
                     if mint not in logger.open_positions and len(logger.open_positions) < MAX_OPEN_POSITIONS:
                         if logger.equity < FIXED_POSITION_USD:
-                            logger.equity = INITIAL_EQUITY
+                            await logger.log("EXECUTOR", "Equity too low for position size.", alert_telegram=False)
+                            continue
 
                         position_size = FIXED_POSITION_USD
                         effective_entry = position_size * (1 - (DEX_FEE_SLIPPAGE_PCT / 2))
@@ -271,9 +270,7 @@ async def monitor_risk_loop(session: aiohttp.ClientSession):
                             pnl_pct_final = (pnl_usd / pos["size_usd"]) * 100
                             logger.equity += pnl_usd
                             
-                            # --- SMART BLACKLIST LOGIC ---
-                            # If it closed in a LOSS, blacklist it so it doesn't re-enter.
-                            # If it closed in a PROFIT, leave it unblacklisted to ride momentum!
+                            # Smart feedback blacklist on loss, keep open on win
                             if pnl_usd < 0:
                                 logger.loser_blacklist[mint] = datetime.now() + timedelta(hours=BLACKLIST_COOLDOWN_HOURS)
                                 reason_tag = f"{reason} (Blacklisted for 4h)"
