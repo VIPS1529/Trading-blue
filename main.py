@@ -1,24 +1,25 @@
 import asyncio
 import aiohttp
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from fastapi import FastAPI, Response
 from fastapi.responses import HTMLResponse
 
 app = FastAPI()
 
 # ==========================================
-# CONFIGURATION & STRICT RISK PARAMETERS
+# CONFIGURATION & $5 POSITION PARAMETERS
 # ==========================================
-INITIAL_EQUITY = 2.00            # Starting virtual balance ($2.00)
-FIXED_POSITION_USD = 2.00        # Fixed size per trade ($2.00)
+INITIAL_EQUITY = 5.00            # Starting virtual balance ($5.00)
+FIXED_POSITION_USD = 5.00        # Fixed size per trade ($5.00)
 MAX_OPEN_POSITIONS = 1           # Only hold 1 position at a time
 DEX_FEE_SLIPPAGE_PCT = 0.015     # 1.5% simulated round-trip slippage
 
-# --- STRICTER FILTER THRESHOLDS ---
-MIN_LIQUIDITY_USD = 40000.0      # Minimum $40k liquidity pool
-MIN_VOLUME_5M_USD = 12000.0      # Minimum $12k 5-minute volume
-MIN_BUY_SELL_RATIO = 1.2         # Must have at least 20% more buyers than sellers
+# --- BULLETPROOF FILTER THRESHOLDS ---
+MIN_LIQUIDITY_USD = 100000.0     # $100k+ liquidity floor
+MIN_VOLUME_5M_USD = 15000.0      # $15k+ 5-minute volume
+MIN_BUY_SELL_RATIO = 1.3         # 30% more buyers than sellers
+BLACKLIST_COOLDOWN_MINUTES = 60  # Do not re-buy the same token for 1 hour after exit
 
 # Risk Engine Thresholds
 STOP_LOSS_PCT = -8.0             # Hard stop at -8%
@@ -37,6 +38,7 @@ class CloudDeskLogger:
     def __init__(self):
         self.equity = INITIAL_EQUITY
         self.open_positions = {}
+        self.blacklist = {}          # mint -> expiration datetime
         self.scanned_count = 0
         self.traded_count = 0
         self.activity_logs = []
@@ -46,7 +48,6 @@ class CloudDeskLogger:
         log_entry = f"[{timestamp}] [{agent}] {message}"
         print(log_entry)
         
-        # Keep last 30 logs for the web dashboard view
         self.activity_logs.insert(0, log_entry)
         if len(self.activity_logs) > 30:
             self.activity_logs.pop()
@@ -79,11 +80,11 @@ def dashboard():
         for mint, pos in logger.open_positions.items():
             positions_html += f"<b>{pos['symbol']}</b> | Entry: ${pos['entry_price']:.6f} | Peak: ${pos['peak_price']:.6f}<br>"
     else:
-        positions_html = "<i>No open positions. Scanning market...</i>"
+        positions_html = "<i>No open positions. Sniper scanning $100k+ pools ($5 Mode)...</i>"
 
     html_content = f"""
     <!DOCTYPE html>
-    html>
+    <html>
     <head>
         <title>Trading-blue Dashboard</title>
         <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -98,7 +99,7 @@ def dashboard():
         </style>
     </head>
     <body>
-        <h2>⚡ Trading-blue: AI Agent Desk</h2>
+        <h2>⚡ Trading-blue: Sniper Desk ($5.00 Mode)</h2>
         
         <div class="card">
             <div>Virtual Equity Pool</div>
@@ -126,7 +127,7 @@ def dashboard():
 
 
 # ==========================================
-# TRADING PIPELINE LOGIC (STRICT FILTERS)
+# TRADING PIPELINE LOGIC ($5 SIZE + $100K + BLACKLIST)
 # ==========================================
 async def scout_and_process_tokens(session: aiohttp.ClientSession):
     url = "https://api.dexscreener.com/token-profiles/latest/v1"
@@ -156,6 +157,9 @@ async def scout_and_process_tokens(session: aiohttp.ClientSession):
                 data = await resp.json()
                 pairs = data.get("pairs") or []
 
+                now = datetime.now()
+                logger.blacklist = {m: exp for m, exp in logger.blacklist.items() if exp > now}
+
                 for p in pairs:
                     if p.get("chainId") != "solana":
                         continue
@@ -163,11 +167,14 @@ async def scout_and_process_tokens(session: aiohttp.ClientSession):
                     symbol = p.get("baseToken", {}).get("symbol", "UNKNOWN")
                     mint = p.get("baseToken", {}).get("address")
                     
+                    if mint in logger.blacklist:
+                        continue
+
                     liquidity = float(p.get("liquidity", {}).get("usd", 0) or 0)
                     volume_5m = float(p.get("volume", {}).get("m5", 0) or 0)
                     price_usd = float(p.get("priceUsd", 0) or 0)
 
-                    # --- ADVANCED FILTER AGENT ---
+                    # --- FILTERS ---
                     if liquidity < MIN_LIQUIDITY_USD:
                         continue
                     if volume_5m < MIN_VOLUME_5M_USD:
@@ -181,7 +188,7 @@ async def scout_and_process_tokens(session: aiohttp.ClientSession):
                     if buys_5m < sells_5m or buy_sell_ratio < MIN_BUY_SELL_RATIO:
                         continue
 
-                    # --- EXECUTOR AGENT ($2 Micro-Position) ---
+                    # --- EXECUTOR AGENT ($5.00 Position) ---
                     if mint not in logger.open_positions and len(logger.open_positions) < MAX_OPEN_POSITIONS:
                         if logger.equity < FIXED_POSITION_USD:
                             logger.equity = INITIAL_EQUITY
@@ -261,6 +268,8 @@ async def monitor_risk_loop(session: aiohttp.ClientSession):
                             pnl_usd = net_return - pos["size_usd"]
                             pnl_pct_final = (pnl_usd / pos["size_usd"]) * 100
                             logger.equity += pnl_usd
+                            
+                            logger.blacklist[mint] = datetime.now() + timedelta(minutes=BLACKLIST_COOLDOWN_MINUTES)
                             logger.open_positions.pop(mint, None)
 
                             sign = "+" if pnl_usd >= 0 else ""
