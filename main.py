@@ -12,9 +12,10 @@ app = FastAPI()
 # ==========================================
 INITIAL_EQUITY = 50.00           # Starting virtual balance ($50.00)
 MARGIN_SIZE_USD = 20.00          # Margin per trade ($20.00 collateral)
-LEVERAGE = 40                    # 40x Leverage (30x-50x target)
-POSITION_VOLUME_USD = MARGIN_SIZE_USD * LEVERAGE  # $800.00 total volume per trade!
+LEVERAGE = 40                    # 40x Leverage
+POSITION_VOLUME_USD = MARGIN_SIZE_USD * LEVERAGE  # $800.00 total volume per trade
 MAX_OPEN_POSITIONS = 2           # Max 2 concurrent high-leverage scalps
+COOLDOWN_HOURS = 5               # 5-hour cooldown for any closed symbol (profit or loss)
 
 TRADING_PAIRS = ["BTC-USDT", "ETH-USDT", "SOL-USDT", "BNB-USDT", "XRP-USDT", "ADA-USDT"]
 
@@ -34,8 +35,9 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 class CloudDeskLogger:
     def __init__(self):
         self.equity = INITIAL_EQUITY
-        self.open_positions = {}     # symbol -> position dict
-        self.latest_prices = {}      # symbol -> current live price
+        self.open_positions = {}         # symbol -> position dict
+        self.symbol_cooldowns = {}       # symbol -> expiration datetime (5-hour lock)
+        self.latest_prices = {}          # symbol -> current live price
         self.price_histories = {pair: [] for pair in TRADING_PAIRS}
         self.scanned_count = 0
         self.traded_count = 0
@@ -67,7 +69,7 @@ logger = CloudDeskLogger()
 
 
 # ==========================================
-# VISUAL DASHBOARD ROUTE (40X LEVERAGE ROI UI)
+# VISUAL DASHBOARD ROUTE (ROI UI)
 # ==========================================
 @app.get("/", response_class=HTMLResponse)
 @app.head("/")
@@ -88,7 +90,6 @@ def dashboard():
                 asset_pct = ((entry - current_price) / entry) * 100
                 mult = 2.0 - (current_price / entry)
 
-            # 40x Leveraged PnL calculation on $20 margin
             leveraged_multiplier = 1.0 + ((mult - 1.0) * LEVERAGE)
             pnl_usd = (pos["margin_usd"] * leveraged_multiplier) - pos["margin_usd"]
             roi_pct = (pnl_usd / pos["margin_usd"]) * 100
@@ -106,11 +107,16 @@ def dashboard():
     else:
         positions_html = f"<i>No open {LEVERAGE}x scalps. Scanning markets...</i>"
 
+    # Show active cooldowns on dashboard
+    now = datetime.now()
+    active_cooldowns = [sym for sym, exp in logger.symbol_cooldowns.items() if exp > now]
+    cooldowns_text = f"<b>Locked Symbols ({len(active_cooldowns)}):</b> " + (", ".join(active_cooldowns) if active_cooldowns else "None")
+
     html_content = f"""
     <!DOCTYPE html>
     <html>
     <head>
-        <title>Trading-blue: {LEVERAGE}x Leverage Scalper</title>
+        <title>Trading-blue: {LEVERAGE}x Cooldown Desk</title>
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <meta http-equiv="refresh" content="2">
         <style>
@@ -118,12 +124,12 @@ def dashboard():
             .card {{ background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 15px; margin-bottom: 15px; }}
             h2 {{ color: #58a6ff; margin-top: 0; font-size: 20px; }}
             .metric {{ font-size: 24px; font-weight: bold; color: #3fb950; }}
-            ul {{ padding-left: 20px; font-family: monospace; font-size: 12px; max-height: 220px; overflow-y: auto; }}
+            ul {{ padding-left: 20px; font-family: monospace; font-size: 12px; max-height: 200px; overflow-y: auto; }}
             li {{ margin-bottom: 5px; border-bottom: 1px solid #21262d; padding-bottom: 3px; }}
         </style>
     </head>
     <body>
-        <h2>⚡ Trading-blue: {LEVERAGE}x Leverage Scalper ($20 Margin)</h2>
+        <h2>⚡ Trading-blue: {LEVERAGE}x Leverage Scalper</h2>
         
         <div class="card">
             <div>Virtual Equity Pool</div>
@@ -132,7 +138,8 @@ def dashboard():
 
         <div class="card">
             <div>Bot Stats</div>
-            <div>Scanned Ticks: <b>{logger.scanned_count}</b> | {LEVERAGE}x Scalps Traded: <b>{logger.traded_count}</b></div>
+            <div>Scanned Ticks: <b>{logger.scanned_count}</b> | Traded: <b>{logger.traded_count}</b></div>
+            <div style="margin-top: 8px; font-size: 13px; color: #8b949e;">{cooldowns_text}</div>
         </div>
 
         <div class="card">
@@ -142,7 +149,7 @@ def dashboard():
 
         <div class="card">
             <div>Live Scalp Logs (Auto-refreshes every 2s)</div>
-            <ul>{logs_html if logs_html else f"<li>Initializing {LEVERAGE}x margin scanner...</li>"}</ul>
+            <ul>{logs_html if logs_html else f"<li>Initializing scanner...</li>"}</ul>
         </div>
     </body>
     </html>
@@ -157,6 +164,10 @@ async def market_watcher_worker():
     async with aiohttp.ClientSession() as session:
         while True:
             try:
+                now = datetime.now()
+                # Clean up expired cooldowns
+                logger.symbol_cooldowns = {sym: exp for sym, exp in logger.symbol_cooldowns.items() if exp > now}
+
                 live_prices = {}
                 for symbol in TRADING_PAIRS:
                     url = f"https://api.kucoin.com/api/v1/market/orderbook/level1?symbol={symbol}"
@@ -176,7 +187,7 @@ async def market_watcher_worker():
                     await asyncio.sleep(1)
                     continue
 
-                # --- 1. MANAGEMENT OF ACTIVE 40X POSITIONS ---
+                # --- 1. MANAGEMENT OF ACTIVE POSITIONS ---
                 open_symbols = list(logger.open_positions.keys())
                 for symbol in open_symbols:
                     pos = logger.open_positions[symbol]
@@ -199,18 +210,18 @@ async def market_watcher_worker():
 
                         leveraged_pnl_pct = asset_pct * LEVERAGE
 
-                        if not pos["trailing_active"] and leveraged_pnl_pct >= 10.0: # Target 10% ROI (+2 USDT)
+                        if not pos["trailing_active"] and leveraged_pnl_pct >= 10.0:
                             pos["trailing_active"] = True
                             await logger.log(f"{LEVERAGE}X-SCALP", f"${symbol} {side} hit +{leveraged_pnl_pct:.1f}% ROI · Target Lock Active")
 
                         should_close = False
                         reason = ""
-                        if leveraged_pnl_pct <= -15.0: # Hard stop at -15% margin loss
+                        if leveraged_pnl_pct <= -15.0:
                             should_close = True
-                            reason = f"hard stop (-15% ROI)"
+                            reason = "hard stop (-15% ROI)"
                         elif pos["trailing_active"] and (drop_from_peak * LEVERAGE) >= 2.0:
                             should_close = True
-                            reason = f"scalp profit secured (>=10% ROI)"
+                            reason = "scalp profit secured (>=10% ROI)"
 
                         if should_close:
                             if side == "LONG":
@@ -224,17 +235,22 @@ async def market_watcher_worker():
                             logger.equity += pnl_usd
 
                             logger.open_positions.pop(symbol, None)
+                            
+                            # APPLY 5-HOUR COOLDOWN TO THIS SYMBOL (whether win or loss)
+                            logger.symbol_cooldowns[symbol] = datetime.now() + timedelta(hours=COOLDOWN_HOURS)
+
                             sign = "+" if pnl_usd >= 0 else ""
                             await logger.log(
                                 f"{LEVERAGE}X-SCALP",
-                                f"CLOSED {LEVERAGE}x {side} {symbol} {reason} · {sign}${pnl_usd:.2f} USDT | Equity: ${logger.equity:.2f}",
+                                f"CLOSED {LEVERAGE}x {side} {symbol} {reason} · {sign}${pnl_usd:.2f} USDT | Cooldown: 5h | Equity: ${logger.equity:.2f}",
                                 alert_telegram=True,
                             )
 
-                # --- 2. 40X ENTRY SCANNER ---
+                # --- 2. ENTRY SCANNER WITH COOLDOWN CHECK ---
                 if len(logger.open_positions) < MAX_OPEN_POSITIONS:
                     for symbol, current_price in live_prices.items():
-                        if symbol in logger.open_positions:
+                        # Skip if already in open positions OR currently locked in 5-hour cooldown
+                        if symbol in logger.open_positions or symbol in logger.symbol_cooldowns:
                             continue
 
                         history = logger.price_histories[symbol]
