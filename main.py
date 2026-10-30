@@ -79,7 +79,6 @@ async def manual_close(symbol: str = Query(...)):
         entry = pos["entry_price"]
         side = pos["side"]
 
-        # Calculate exact PnL at manual close
         if side == "LONG":
             mult = current_price / entry
         else:
@@ -90,7 +89,6 @@ async def manual_close(symbol: str = Query(...)):
         pnl_usd = net_return - pos["margin_usd"]
         logger.equity += pnl_usd
 
-        # Remove position and apply 5-hour cooldown
         logger.open_positions.pop(symbol, None)
         logger.symbol_cooldowns[symbol] = datetime.now() + timedelta(hours=COOLDOWN_HOURS)
 
@@ -105,7 +103,7 @@ async def manual_close(symbol: str = Query(...)):
 
 
 # ==========================================
-# VISUAL DASHBOARD ROUTE (UI WITH CLOSE BUTTONS)
+# VISUAL DASHBOARD ROUTE (DYNAMIC GREEN/RED UI)
 # ==========================================
 @app.get("/", response_class=HTMLResponse)
 @app.head("/")
@@ -130,11 +128,14 @@ def dashboard():
             pnl_usd = (pos["margin_usd"] * leveraged_multiplier) - pos["margin_usd"]
             roi_pct = (pnl_usd / pos["margin_usd"]) * 100
 
-            color = "#3fb950" if pnl_usd >= 0 else "#f85149"
-            sign = "+" if pnl_usd >= 0 else ""
+            # Dynamic color assignments
+            is_profit = pnl_usd >= 0
+            color = "#3fb950" if is_profit else "#f85149"
+            bg_color = "rgba(63, 185, 80, 0.08)" if is_profit else "rgba(248, 81, 73, 0.08)"
+            sign = "+" if is_profit else ""
 
             positions_html += f"""
-            <div style="background: #21262d; border-left: 4px solid {color}; padding: 12px; margin-bottom: 10px; border-radius: 6px; display: flex; justify-content: space-between; align-items: center;">
+            <div style="background: {bg_color}; border: 1px solid {color}; border-left: 5px solid {color}; padding: 12px; margin-bottom: 10px; border-radius: 6px; display: flex; justify-content: space-between; align-items: center;">
                 <div>
                     <b>{LEVERAGE}x {side} {sym}</b> (${pos['volume_usd']:,.0f} Vol)<br>
                     Entry: ${entry:,.2f} | Current: ${current_price:,.2f}<br>
