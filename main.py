@@ -8,18 +8,20 @@ from fastapi.responses import HTMLResponse
 app = FastAPI()
 
 # ==========================================
-# CONFIGURATION & SCALPING PARAMETERS
+# CONFIGURATION & 40X LEVERAGE PARAMETERS
 # ==========================================
 INITIAL_EQUITY = 50.00           # Starting virtual balance ($50.00)
-FIXED_POSITION_USD = 20.00       # Safer scalp size ($20.00 per trade)
-MAX_OPEN_POSITIONS = 2           # Max 2 simultaneous scalps ($40 total exposure)
+MARGIN_SIZE_USD = 20.00          # Margin per trade ($20.00 collateral)
+LEVERAGE = 40                    # 40x Leverage (30x-50x target)
+POSITION_VOLUME_USD = MARGIN_SIZE_USD * LEVERAGE  # $800.00 total volume per trade!
+MAX_OPEN_POSITIONS = 2           # Max 2 concurrent high-leverage scalps
 
 TRADING_PAIRS = ["BTC-USDT", "ETH-USDT", "SOL-USDT", "BNB-USDT", "XRP-USDT", "ADA-USDT"]
 
-# Scalping Risk Engine Thresholds (Tighter & Faster)
-STOP_LOSS_PCT = -2.5             # Tight hard stop at -2.5%
-TRAIL_ACTIVATION_PCT = 1.5       # Quick activation at +1.5%
-TRAIL_DROP_PCT = 0.8             # Secure profit if price drops 0.8% from peak
+# Ultra-Tight Scalping Risk Engine for 40x Leverage
+STOP_LOSS_PCT = -0.5             # Asset move -0.5% = -20% margin loss hard stop
+TRAIL_ACTIVATION_PCT = 0.25      # Activate trailing profit at +0.25% asset move (+10% ROI)
+TRAIL_DROP_PCT = 0.1             # Secure profit when price drops 0.1% from peak
 
 # Telegram Credentials
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -65,7 +67,7 @@ logger = CloudDeskLogger()
 
 
 # ==========================================
-# VISUAL DASHBOARD ROUTE (SCALPER ROI UI)
+# VISUAL DASHBOARD ROUTE (40X LEVERAGE ROI UI)
 # ==========================================
 @app.get("/", response_class=HTMLResponse)
 @app.head("/")
@@ -80,31 +82,35 @@ def dashboard():
             side = pos["side"]
 
             if side == "LONG":
-                pnl_pct = ((current_price - entry) / entry) * 100
+                asset_pct = ((current_price - entry) / entry) * 100
                 mult = current_price / entry
             else: # SHORT
-                pnl_pct = ((entry - current_price) / entry) * 100
+                asset_pct = ((entry - current_price) / entry) * 100
                 mult = 2.0 - (current_price / entry)
 
-            pnl_usd = (pos["size_usd"] * mult) - pos["size_usd"]
+            # 40x Leveraged PnL calculation on $20 margin
+            leveraged_multiplier = 1.0 + ((mult - 1.0) * LEVERAGE)
+            pnl_usd = (pos["margin_usd"] * leveraged_multiplier) - pos["margin_usd"]
+            roi_pct = (pnl_usd / pos["margin_usd"]) * 100
+
             color = "#3fb950" if pnl_usd >= 0 else "#f85149"
             sign = "+" if pnl_usd >= 0 else ""
 
             positions_html += f"""
             <div style="background: #21262d; border-left: 4px solid {color}; padding: 10px; margin-bottom: 8px; border-radius: 4px;">
-                <b>SCALP {side} {sym}</b><br>
+                <b>{LEVERAGE}x {side} {sym}</b> (${pos['volume_usd']:,.0f} Vol)<br>
                 Entry: ${entry:,.2f} | Current: ${current_price:,.2f}<br>
-                Floating PnL: <span style="color: {color}; font-weight: bold;">{sign}${pnl_usd:.2f} ({sign}{pnl_pct:.2f}%)</span>
+                Margin PnL: <span style="color: {color}; font-weight: bold;">{sign}${pnl_usd:.2f} ({sign}{roi_pct:.1f}% ROI)</span>
             </div>
             """
     else:
-        positions_html = "<i>No open scalps. Scanning micro-momentum across KuCoin...</i>"
+        positions_html = f"<i>No open {LEVERAGE}x scalps. Scanning markets...</i>"
 
     html_content = f"""
     <!DOCTYPE html>
     <html>
     <head>
-        <title>Trading-blue: Scalper Desk</title>
+        <title>Trading-blue: {LEVERAGE}x Leverage Scalper</title>
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <meta http-equiv="refresh" content="2">
         <style>
@@ -117,7 +123,7 @@ def dashboard():
         </style>
     </head>
     <body>
-        <h2>⚡ Trading-blue: High-Frequency Scalper ($20 Size)</h2>
+        <h2>⚡ Trading-blue: {LEVERAGE}x Leverage Scalper ($20 Margin)</h2>
         
         <div class="card">
             <div>Virtual Equity Pool</div>
@@ -126,17 +132,17 @@ def dashboard():
 
         <div class="card">
             <div>Bot Stats</div>
-            <div>Scanned Ticks: <b>{logger.scanned_count}</b> | Scalps Traded: <b>{logger.traded_count}</b></div>
+            <div>Scanned Ticks: <b>{logger.scanned_count}</b> | {LEVERAGE}x Scalps Traded: <b>{logger.traded_count}</b></div>
         </div>
 
         <div class="card">
-            <div>Active Scalps ({len(logger.open_positions)}/{MAX_OPEN_POSITIONS})</div>
+            <div>Active {LEVERAGE}x Scalps ({len(logger.open_positions)}/{MAX_OPEN_POSITIONS})</div>
             <div style="margin-top: 10px;">{positions_html}</div>
         </div>
 
         <div class="card">
             <div>Live Scalp Logs (Auto-refreshes every 2s)</div>
-            <ul>{logs_html if logs_html else "<li>Initializing scalp scanner...</li>"}</ul>
+            <ul>{logs_html if logs_html else f"<li>Initializing {LEVERAGE}x margin scanner...</li>"}</ul>
         </div>
     </body>
     </html>
@@ -145,7 +151,7 @@ def dashboard():
 
 
 # ==========================================
-# HIGH-FREQUENCY SCALPER ENGINE WORKER
+# 40X LEVERAGE SCALPER ENGINE WORKER
 # ==========================================
 async def market_watcher_worker():
     async with aiohttp.ClientSession() as session:
@@ -164,13 +170,13 @@ async def market_watcher_worker():
                                     live_prices[symbol] = price
                                     logger.latest_prices[symbol] = price
                                     logger.scanned_count += 1
-                    await asyncio.sleep(0.05) # Hyper-fast polling
+                    asyncio.sleep(0.05)
 
                 if not live_prices:
                     await asyncio.sleep(1)
                     continue
 
-                # --- 1. MANAGEMENT OF ACTIVE SCALPS ---
+                # --- 1. MANAGEMENT OF ACTIVE 40X POSITIONS ---
                 open_symbols = list(logger.open_positions.keys())
                 for symbol in open_symbols:
                     pos = logger.open_positions[symbol]
@@ -181,28 +187,30 @@ async def market_watcher_worker():
                         side = pos["side"]
 
                         if side == "LONG":
-                            pnl_pct = ((current_price - entry) / entry) * 100
+                            asset_pct = ((current_price - entry) / entry) * 100
                             if current_price > pos["peak_price"]:
                                 pos["peak_price"] = current_price
                             drop_from_peak = ((pos["peak_price"] - current_price) / pos["peak_price"]) * 100
                         else: # SHORT
-                            pnl_pct = ((entry - current_price) / entry) * 100
+                            asset_pct = ((entry - current_price) / entry) * 100
                             if current_price < pos["peak_price"]:
                                 pos["peak_price"] = current_price
                             drop_from_peak = ((current_price - pos["peak_price"]) / pos["peak_price"]) * 100
 
-                        if not pos["trailing_active"] and pnl_pct >= TRAIL_ACTIVATION_PCT:
+                        leveraged_pnl_pct = asset_pct * LEVERAGE
+
+                        if not pos["trailing_active"] and leveraged_pnl_pct >= 10.0: # Target 10% ROI (+2 USDT)
                             pos["trailing_active"] = True
-                            await logger.log("SCALP", f"${symbol} {side} hit +{pnl_pct:.1f}% · Target Lock Active")
+                            await logger.log(f"{LEVERAGE}X-SCALP", f"${symbol} {side} hit +{leveraged_pnl_pct:.1f}% ROI · Target Lock Active")
 
                         should_close = False
                         reason = ""
-                        if pnl_pct <= STOP_LOSS_PCT:
+                        if leveraged_pnl_pct <= -15.0: # Hard stop at -15% margin loss
                             should_close = True
-                            reason = "hard stop -2.5%"
-                        elif pos["trailing_active"] and drop_from_peak >= TRAIL_DROP_PCT:
+                            reason = f"hard stop (-15% ROI)"
+                        elif pos["trailing_active"] and (drop_from_peak * LEVERAGE) >= 2.0:
                             should_close = True
-                            reason = "scalp profit secured"
+                            reason = f"scalp profit secured (>=10% ROI)"
 
                         if should_close:
                             if side == "LONG":
@@ -210,20 +218,20 @@ async def market_watcher_worker():
                             else:
                                 mult = 2.0 - (current_price / entry)
 
-                            net_return = pos["size_usd"] * mult
-                            pnl_usd = net_return - pos["size_usd"]
-                            pnl_pct_final = (pnl_usd / pos["size_usd"]) * 100
+                            leveraged_multiplier = 1.0 + ((mult - 1.0) * LEVERAGE)
+                            net_return = pos["margin_usd"] * leveraged_multiplier
+                            pnl_usd = net_return - pos["margin_usd"]
                             logger.equity += pnl_usd
 
                             logger.open_positions.pop(symbol, None)
                             sign = "+" if pnl_usd >= 0 else ""
                             await logger.log(
-                                "SCALP",
-                                f"CLOSED {side} {symbol} {reason} · {sign}${pnl_usd:.2f} ({sign}{pnl_pct_final:.2f}%) | Equity: ${logger.equity:.2f}",
+                                f"{LEVERAGE}X-SCALP",
+                                f"CLOSED {LEVERAGE}x {side} {symbol} {reason} · {sign}${pnl_usd:.2f} USDT | Equity: ${logger.equity:.2f}",
                                 alert_telegram=True,
                             )
 
-                # --- 2. LIGHTNING-FAST SCALP ENTRY SCANNER ---
+                # --- 2. 40X ENTRY SCANNER ---
                 if len(logger.open_positions) < MAX_OPEN_POSITIONS:
                     for symbol, current_price in live_prices.items():
                         if symbol in logger.open_positions:
@@ -239,30 +247,30 @@ async def market_watcher_worker():
                             price_end = history[-1]
                             momentum_pct = ((price_end - price_start) / price_start) * 100
 
-                            # Micro-scalp sensitivity (0.015% quick trigger)
-                            if abs(momentum_pct) > 0.015:
+                            if abs(momentum_pct) > 0.01:
                                 chosen_side = "LONG" if momentum_pct > 0 else "SHORT"
 
-                                if logger.equity >= FIXED_POSITION_USD and len(logger.open_positions) < MAX_OPEN_POSITIONS:
+                                if logger.equity >= MARGIN_SIZE_USD and len(logger.open_positions) < MAX_OPEN_POSITIONS:
                                     logger.open_positions[symbol] = {
                                         "symbol": symbol,
                                         "side": chosen_side,
                                         "entry_price": current_price,
                                         "peak_price": current_price,
-                                        "size_usd": FIXED_POSITION_USD,
+                                        "margin_usd": MARGIN_SIZE_USD,
+                                        "volume_usd": POSITION_VOLUME_USD,
                                         "trailing_active": False,
                                     }
                                     logger.traded_count += 1
                                     await logger.log(
-                                        "SCALP",
-                                        f"OPENED {chosen_side} {symbol} · size ${FIXED_POSITION_USD:.2f} @ ${current_price:,.2f}",
+                                        f"{LEVERAGE}X-SCALP",
+                                        f"OPENED {LEVERAGE}x {chosen_side} {symbol} · Margin: ${MARGIN_SIZE_USD:.2f} (Vol: ${POSITION_VOLUME_USD:,.0f}) @ ${current_price:,.2f}",
                                         alert_telegram=True,
                                     )
 
             except Exception as e:
                 await logger.log("WATCHER", f"Scan error: {e}")
 
-            await asyncio.sleep(1.0) # 1-second ultra-fast scalping loop
+            await asyncio.sleep(1.0)
 
 
 @app.on_event("startup")
