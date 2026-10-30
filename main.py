@@ -8,13 +8,12 @@ from fastapi.responses import HTMLResponse
 app = FastAPI()
 
 # ==========================================
-# CONFIGURATION & HIGH-SPEED MULTI-POS PARAMS
+# CONFIGURATION & PARAMETERS
 # ==========================================
 INITIAL_EQUITY = 50.00           # Starting virtual balance ($50.00)
 FIXED_POSITION_USD = 5.00        # Fixed size per trade ($5.00)
-MAX_OPEN_POSITIONS = 3           # Increased to 3 simultaneous trades!
+MAX_OPEN_POSITIONS = 3           # Up to 3 simultaneous trades
 
-# KuCoin trading pairs format (Base-Quote)
 TRADING_PAIRS = ["BTC-USDT", "ETH-USDT", "SOL-USDT", "BNB-USDT", "XRP-USDT", "ADA-USDT"]
 
 # Risk Engine Thresholds
@@ -28,12 +27,13 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
 
 # ==========================================
-# LOGGER & ACTIVITY FEED
+# LOGGER & STATE MANAGEMENT
 # ==========================================
 class CloudDeskLogger:
     def __init__(self):
         self.equity = INITIAL_EQUITY
-        self.open_positions = {}     # Dictionary tracking active positions by symbol
+        self.open_positions = {}     # symbol -> position dict
+        self.latest_prices = {}      # symbol -> current live price
         self.price_histories = {pair: [] for pair in TRADING_PAIRS}
         self.scanned_count = 0
         self.traded_count = 0
@@ -65,7 +65,7 @@ logger = CloudDeskLogger()
 
 
 # ==========================================
-# VISUAL DASHBOARD ROUTE (HTML / HEAD)
+# VISUAL DASHBOARD ROUTE (ACTIVE ROI UI)
 # ==========================================
 @app.get("/", response_class=HTMLResponse)
 @app.head("/")
@@ -75,28 +75,50 @@ def dashboard():
     
     if logger.open_positions:
         for sym, pos in logger.open_positions.items():
-            positions_html += f"<b>{pos['side']} {sym}</b> | Entry: ${pos['entry_price']:,.2f} | Peak: ${pos['peak_price']:,.2f}<br>"
+            current_price = logger.latest_prices.get(sym, pos["entry_price"])
+            entry = pos["entry_price"]
+            side = pos["side"]
+
+            # Calculate live ROI & PnL
+            if side == "LONG":
+                pnl_pct = ((current_price - entry) / entry) * 100
+                mult = current_price / entry
+            else: # SHORT
+                pnl_pct = ((entry - current_price) / entry) * 100
+                mult = 2.0 - (current_price / entry)
+
+            pnl_usd = (pos["size_usd"] * mult) - pos["size_usd"]
+            color = "#3fb950" if pnl_usd >= 0 else "#f85149"
+            sign = "+" if pnl_usd >= 0 else ""
+
+            positions_html += f"""
+            <div style="background: #21262d; border-left: 4px solid {color}; padding: 10px; margin-bottom: 8px; border-radius: 4px;">
+                <b>{side} {sym}</b><br>
+                Entry: ${entry:,.2f} | Current: ${current_price:,.2f}<br>
+                Floating PnL: <span style="color: {color}; font-weight: bold;">{sign}${pnl_usd:.2f} ({sign}{pnl_pct:.2f}%)</span>
+            </div>
+            """
     else:
-        positions_html = f"<i>No open positions. High-speed scanning {len(TRADING_PAIRS)} pairs (Max 3 Trades)...</i>"
+        positions_html = "<i>No open positions. Scanning KuCoin markets...</i>"
 
     html_content = f"""
     <!DOCTYPE html>
     <html>
     <head>
-        <title>Trading-blue: High-Speed Multi-Pos Desk</title>
+        <title>Trading-blue: Live ROI Desk</title>
         <meta name="viewport" content="width=device-width, initial-scale=1">
-        <meta http-equiv="refresh" content="5">
+        <meta http-equiv="refresh" content="3">
         <style>
             body {{ background-color: #0d1117; color: #c9d1d9; font-family: -apple-system, BlinkMacSystemFont, sans-serif; padding: 20px; margin: 0; }}
             .card {{ background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 15px; margin-bottom: 15px; }}
             h2 {{ color: #58a6ff; margin-top: 0; font-size: 20px; }}
             .metric {{ font-size: 24px; font-weight: bold; color: #3fb950; }}
-            ul {{ padding-left: 20px; font-family: monospace; font-size: 13px; max-height: 250px; overflow-y: auto; }}
+            ul {{ padding-left: 20px; font-family: monospace; font-size: 13px; max-height: 220px; overflow-y: auto; }}
             li {{ margin-bottom: 5px; border-bottom: 1px solid #21262d; padding-bottom: 3px; }}
         </style>
     </head>
     <body>
-        <h2>⚡ Trading-blue: High-Speed Multi-Pos Desk</h2>
+        <h2>⚡ Trading-blue: Live ROI Desk</h2>
         
         <div class="card">
             <div>Virtual Equity Pool</div>
@@ -110,11 +132,11 @@ def dashboard():
 
         <div class="card">
             <div>Active Open Positions ({len(logger.open_positions)}/3)</div>
-            <div>{positions_html}</div>
+            <div style="margin-top: 10px;">{positions_html}</div>
         </div>
 
         <div class="card">
-            <div>Live Activity Logs (Auto-refreshes every 5s)</div>
+            <div>Live Activity Logs (Auto-refreshes every 3s)</div>
             <ul>{logs_html if logs_html else "<li>Waiting for market data...</li>"}</ul>
         </div>
     </body>
@@ -124,7 +146,7 @@ def dashboard():
 
 
 # ==========================================
-# HIGH-SPEED KUCOIN MARKET WATCHER WORKER
+# KUCOIN MARKET WATCHER WORKER
 # ==========================================
 async def market_watcher_worker():
     async with aiohttp.ClientSession() as session:
@@ -139,9 +161,11 @@ async def market_watcher_worker():
                             if data.get("code") == "200000" and data.get("data"):
                                 price_str = data["data"].get("price")
                                 if price_str:
-                                    live_prices[symbol] = float(price_str)
+                                    price = float(price_str)
+                                    live_prices[symbol] = price
+                                    logger.latest_prices[symbol] = price
                                     logger.scanned_count += 1
-                    await asyncio.sleep(0.1) # Accelerated scan speed
+                    await asyncio.sleep(0.1)
 
                 if not live_prices:
                     await asyncio.sleep(2)
@@ -200,16 +224,15 @@ async def market_watcher_worker():
                                 alert_telegram=True,
                             )
 
-                # --- 2. HIGH-SPEED MULTI-POSITION ENTRY SCANNER ---
+                # --- 2. HIGH-SPEED ENTRY SCANNER ---
                 if len(logger.open_positions) < MAX_OPEN_POSITIONS:
                     for symbol, current_price in live_prices.items():
-                        # Skip if already holding this symbol
                         if symbol in logger.open_positions:
                             continue
 
                         history = logger.price_histories[symbol]
                         history.append(current_price)
-                        if len(history) > 3: # Reduced tick history requirement for faster triggers
+                        if len(history) > 3:
                             history.pop(0)
 
                         if len(history) >= 3:
@@ -217,7 +240,6 @@ async def market_watcher_worker():
                             price_end = history[-1]
                             momentum_pct = ((price_end - price_start) / price_start) * 100
 
-                            # Lowered momentum sensitivity to 0.02% for faster high-frequency testing
                             if abs(momentum_pct) > 0.02:
                                 chosen_side = "LONG" if momentum_pct > 0 else "SHORT"
 
@@ -240,7 +262,7 @@ async def market_watcher_worker():
             except Exception as e:
                 await logger.log("WATCHER", f"Scan error: {e}")
 
-            await asyncio.sleep(1.5) # Much faster check loop (every 1.5 seconds)
+            await asyncio.sleep(1.5)
 
 
 @app.on_event("startup")
