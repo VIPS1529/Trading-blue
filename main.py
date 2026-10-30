@@ -8,18 +8,18 @@ from fastapi.responses import HTMLResponse
 app = FastAPI()
 
 # ==========================================
-# CONFIGURATION & PARAMETERS
+# CONFIGURATION & SCALPING PARAMETERS
 # ==========================================
 INITIAL_EQUITY = 50.00           # Starting virtual balance ($50.00)
-FIXED_POSITION_USD = 5.00        # Fixed size per trade ($5.00)
-MAX_OPEN_POSITIONS = 3           # Up to 3 simultaneous trades
+FIXED_POSITION_USD = 20.00       # Safer scalp size ($20.00 per trade)
+MAX_OPEN_POSITIONS = 2           # Max 2 simultaneous scalps ($40 total exposure)
 
 TRADING_PAIRS = ["BTC-USDT", "ETH-USDT", "SOL-USDT", "BNB-USDT", "XRP-USDT", "ADA-USDT"]
 
-# Risk Engine Thresholds
-STOP_LOSS_PCT = -8.0             # Hard stop at -8%
-TRAIL_ACTIVATION_PCT = 8.0       # Activate trailing stop at +8%
-TRAIL_DROP_PCT = 2.5             # Sell if price moves 2.5% against peak after activation
+# Scalping Risk Engine Thresholds (Tighter & Faster)
+STOP_LOSS_PCT = -2.5             # Tight hard stop at -2.5%
+TRAIL_ACTIVATION_PCT = 1.5       # Quick activation at +1.5%
+TRAIL_DROP_PCT = 0.8             # Secure profit if price drops 0.8% from peak
 
 # Telegram Credentials
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -65,7 +65,7 @@ logger = CloudDeskLogger()
 
 
 # ==========================================
-# VISUAL DASHBOARD ROUTE (ACTIVE ROI UI)
+# VISUAL DASHBOARD ROUTE (SCALPER ROI UI)
 # ==========================================
 @app.get("/", response_class=HTMLResponse)
 @app.head("/")
@@ -79,7 +79,6 @@ def dashboard():
             entry = pos["entry_price"]
             side = pos["side"]
 
-            # Calculate live ROI & PnL
             if side == "LONG":
                 pnl_pct = ((current_price - entry) / entry) * 100
                 mult = current_price / entry
@@ -93,32 +92,32 @@ def dashboard():
 
             positions_html += f"""
             <div style="background: #21262d; border-left: 4px solid {color}; padding: 10px; margin-bottom: 8px; border-radius: 4px;">
-                <b>{side} {sym}</b><br>
+                <b>SCALP {side} {sym}</b><br>
                 Entry: ${entry:,.2f} | Current: ${current_price:,.2f}<br>
                 Floating PnL: <span style="color: {color}; font-weight: bold;">{sign}${pnl_usd:.2f} ({sign}{pnl_pct:.2f}%)</span>
             </div>
             """
     else:
-        positions_html = "<i>No open positions. Scanning KuCoin markets...</i>"
+        positions_html = "<i>No open scalps. Scanning micro-momentum across KuCoin...</i>"
 
     html_content = f"""
     <!DOCTYPE html>
     <html>
     <head>
-        <title>Trading-blue: Live ROI Desk</title>
+        <title>Trading-blue: Scalper Desk</title>
         <meta name="viewport" content="width=device-width, initial-scale=1">
-        <meta http-equiv="refresh" content="3">
+        <meta http-equiv="refresh" content="2">
         <style>
             body {{ background-color: #0d1117; color: #c9d1d9; font-family: -apple-system, BlinkMacSystemFont, sans-serif; padding: 20px; margin: 0; }}
             .card {{ background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 15px; margin-bottom: 15px; }}
             h2 {{ color: #58a6ff; margin-top: 0; font-size: 20px; }}
             .metric {{ font-size: 24px; font-weight: bold; color: #3fb950; }}
-            ul {{ padding-left: 20px; font-family: monospace; font-size: 13px; max-height: 220px; overflow-y: auto; }}
+            ul {{ padding-left: 20px; font-family: monospace; font-size: 12px; max-height: 220px; overflow-y: auto; }}
             li {{ margin-bottom: 5px; border-bottom: 1px solid #21262d; padding-bottom: 3px; }}
         </style>
     </head>
     <body>
-        <h2>⚡ Trading-blue: Live ROI Desk</h2>
+        <h2>⚡ Trading-blue: High-Frequency Scalper ($20 Size)</h2>
         
         <div class="card">
             <div>Virtual Equity Pool</div>
@@ -127,17 +126,17 @@ def dashboard():
 
         <div class="card">
             <div>Bot Stats</div>
-            <div>Scanned Ticks: <b>{logger.scanned_count}</b> | Traded: <b>{logger.traded_count}</b></div>
+            <div>Scanned Ticks: <b>{logger.scanned_count}</b> | Scalps Traded: <b>{logger.traded_count}</b></div>
         </div>
 
         <div class="card">
-            <div>Active Open Positions ({len(logger.open_positions)}/3)</div>
+            <div>Active Scalps ({len(logger.open_positions)}/{MAX_OPEN_POSITIONS})</div>
             <div style="margin-top: 10px;">{positions_html}</div>
         </div>
 
         <div class="card">
-            <div>Live Activity Logs (Auto-refreshes every 3s)</div>
-            <ul>{logs_html if logs_html else "<li>Waiting for market data...</li>"}</ul>
+            <div>Live Scalp Logs (Auto-refreshes every 2s)</div>
+            <ul>{logs_html if logs_html else "<li>Initializing scalp scanner...</li>"}</ul>
         </div>
     </body>
     </html>
@@ -146,7 +145,7 @@ def dashboard():
 
 
 # ==========================================
-# KUCOIN MARKET WATCHER WORKER
+# HIGH-FREQUENCY SCALPER ENGINE WORKER
 # ==========================================
 async def market_watcher_worker():
     async with aiohttp.ClientSession() as session:
@@ -155,7 +154,7 @@ async def market_watcher_worker():
                 live_prices = {}
                 for symbol in TRADING_PAIRS:
                     url = f"https://api.kucoin.com/api/v1/market/orderbook/level1?symbol={symbol}"
-                    async with session.get(url, timeout=3) as resp:
+                    async with session.get(url, timeout=2.5) as resp:
                         if resp.status == 200:
                             data = await resp.json()
                             if data.get("code") == "200000" and data.get("data"):
@@ -165,13 +164,13 @@ async def market_watcher_worker():
                                     live_prices[symbol] = price
                                     logger.latest_prices[symbol] = price
                                     logger.scanned_count += 1
-                    await asyncio.sleep(0.1)
+                    await asyncio.sleep(0.05) # Hyper-fast polling
 
                 if not live_prices:
-                    await asyncio.sleep(2)
+                    await asyncio.sleep(1)
                     continue
 
-                # --- 1. MANAGEMENT OF OPEN POSITIONS ---
+                # --- 1. MANAGEMENT OF ACTIVE SCALPS ---
                 open_symbols = list(logger.open_positions.keys())
                 for symbol in open_symbols:
                     pos = logger.open_positions[symbol]
@@ -194,16 +193,16 @@ async def market_watcher_worker():
 
                         if not pos["trailing_active"] and pnl_pct >= TRAIL_ACTIVATION_PCT:
                             pos["trailing_active"] = True
-                            await logger.log("RISK", f"${symbol} {side} hit +{pnl_pct:.1f}% · Trailing Stop Active")
+                            await logger.log("SCALP", f"${symbol} {side} hit +{pnl_pct:.1f}% · Target Lock Active")
 
                         should_close = False
                         reason = ""
                         if pnl_pct <= STOP_LOSS_PCT:
                             should_close = True
-                            reason = "hard stop -8%"
+                            reason = "hard stop -2.5%"
                         elif pos["trailing_active"] and drop_from_peak >= TRAIL_DROP_PCT:
                             should_close = True
-                            reason = "trail profit secured"
+                            reason = "scalp profit secured"
 
                         if should_close:
                             if side == "LONG":
@@ -219,12 +218,12 @@ async def market_watcher_worker():
                             logger.open_positions.pop(symbol, None)
                             sign = "+" if pnl_usd >= 0 else ""
                             await logger.log(
-                                "RISK",
-                                f"CLOSED {side} {symbol} {reason} · {sign}${pnl_usd:.2f} ({sign}{pnl_pct_final:.1f}%) | Equity: ${logger.equity:.2f}",
+                                "SCALP",
+                                f"CLOSED {side} {symbol} {reason} · {sign}${pnl_usd:.2f} ({sign}{pnl_pct_final:.2f}%) | Equity: ${logger.equity:.2f}",
                                 alert_telegram=True,
                             )
 
-                # --- 2. HIGH-SPEED ENTRY SCANNER ---
+                # --- 2. LIGHTNING-FAST SCALP ENTRY SCANNER ---
                 if len(logger.open_positions) < MAX_OPEN_POSITIONS:
                     for symbol, current_price in live_prices.items():
                         if symbol in logger.open_positions:
@@ -240,7 +239,8 @@ async def market_watcher_worker():
                             price_end = history[-1]
                             momentum_pct = ((price_end - price_start) / price_start) * 100
 
-                            if abs(momentum_pct) > 0.02:
+                            # Micro-scalp sensitivity (0.015% quick trigger)
+                            if abs(momentum_pct) > 0.015:
                                 chosen_side = "LONG" if momentum_pct > 0 else "SHORT"
 
                                 if logger.equity >= FIXED_POSITION_USD and len(logger.open_positions) < MAX_OPEN_POSITIONS:
@@ -254,7 +254,7 @@ async def market_watcher_worker():
                                     }
                                     logger.traded_count += 1
                                     await logger.log(
-                                        "EXECUTOR",
+                                        "SCALP",
                                         f"OPENED {chosen_side} {symbol} · size ${FIXED_POSITION_USD:.2f} @ ${current_price:,.2f}",
                                         alert_telegram=True,
                                     )
@@ -262,7 +262,7 @@ async def market_watcher_worker():
             except Exception as e:
                 await logger.log("WATCHER", f"Scan error: {e}")
 
-            await asyncio.sleep(1.5)
+            await asyncio.sleep(1.0) # 1-second ultra-fast scalping loop
 
 
 @app.on_event("startup")
