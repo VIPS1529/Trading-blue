@@ -2,8 +2,8 @@ import asyncio
 import aiohttp
 import os
 from datetime import datetime, timedelta
-from fastapi import FastAPI, Response
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI, Response, Query
+from fastapi.responses import HTMLResponse, RedirectResponse
 
 app = FastAPI()
 
@@ -15,7 +15,7 @@ MARGIN_SIZE_USD = 20.00          # Margin per trade ($20.00 collateral)
 LEVERAGE = 40                    # 40x Leverage
 POSITION_VOLUME_USD = MARGIN_SIZE_USD * LEVERAGE  # $800.00 total volume per trade
 MAX_OPEN_POSITIONS = 2           # Max 2 concurrent high-leverage scalps
-COOLDOWN_HOURS = 5               # 5-hour cooldown for any closed symbol (profit or loss)
+COOLDOWN_HOURS = 5               # 5-hour cooldown for any closed symbol
 
 TRADING_PAIRS = ["BTC-USDT", "ETH-USDT", "SOL-USDT", "BNB-USDT", "XRP-USDT", "ADA-USDT"]
 
@@ -36,7 +36,7 @@ class CloudDeskLogger:
     def __init__(self):
         self.equity = INITIAL_EQUITY
         self.open_positions = {}         # symbol -> position dict
-        self.symbol_cooldowns = {}       # symbol -> expiration datetime (5-hour lock)
+        self.symbol_cooldowns = {}       # symbol -> expiration datetime
         self.latest_prices = {}          # symbol -> current live price
         self.price_histories = {pair: [] for pair in TRADING_PAIRS}
         self.scanned_count = 0
@@ -69,7 +69,43 @@ logger = CloudDeskLogger()
 
 
 # ==========================================
-# VISUAL DASHBOARD ROUTE (ROI UI)
+# MANUAL CLOSE ROUTE (TRIGGERED VIA UI BUTTON)
+# ==========================================
+@app.get("/close")
+async def manual_close(symbol: str = Query(...)):
+    if symbol in logger.open_positions:
+        pos = logger.open_positions[symbol]
+        current_price = logger.latest_prices.get(symbol, pos["entry_price"])
+        entry = pos["entry_price"]
+        side = pos["side"]
+
+        # Calculate exact PnL at manual close
+        if side == "LONG":
+            mult = current_price / entry
+        else:
+            mult = 2.0 - (current_price / entry)
+
+        leveraged_multiplier = 1.0 + ((mult - 1.0) * LEVERAGE)
+        net_return = pos["margin_usd"] * leveraged_multiplier
+        pnl_usd = net_return - pos["margin_usd"]
+        logger.equity += pnl_usd
+
+        # Remove position and apply 5-hour cooldown
+        logger.open_positions.pop(symbol, None)
+        logger.symbol_cooldowns[symbol] = datetime.now() + timedelta(hours=COOLDOWN_HOURS)
+
+        sign = "+" if pnl_usd >= 0 else ""
+        await logger.log(
+            "MANUAL",
+            f"CLOSED 4x {side} {symbol} manually · {sign}${pnl_usd:.2f} USDT | Cooldown: 5h | Equity: ${logger.equity:.2f}",
+            alert_telegram=True,
+        )
+
+    return RedirectResponse(url="/", status_code=303)
+
+
+# ==========================================
+# VISUAL DASHBOARD ROUTE (UI WITH CLOSE BUTTONS)
 # ==========================================
 @app.get("/", response_class=HTMLResponse)
 @app.head("/")
@@ -98,16 +134,20 @@ def dashboard():
             sign = "+" if pnl_usd >= 0 else ""
 
             positions_html += f"""
-            <div style="background: #21262d; border-left: 4px solid {color}; padding: 10px; margin-bottom: 8px; border-radius: 4px;">
-                <b>{LEVERAGE}x {side} {sym}</b> (${pos['volume_usd']:,.0f} Vol)<br>
-                Entry: ${entry:,.2f} | Current: ${current_price:,.2f}<br>
-                Margin PnL: <span style="color: {color}; font-weight: bold;">{sign}${pnl_usd:.2f} ({sign}{roi_pct:.1f}% ROI)</span>
+            <div style="background: #21262d; border-left: 4px solid {color}; padding: 12px; margin-bottom: 10px; border-radius: 6px; display: flex; justify-content: space-between; align-items: center;">
+                <div>
+                    <b>{LEVERAGE}x {side} {sym}</b> (${pos['volume_usd']:,.0f} Vol)<br>
+                    Entry: ${entry:,.2f} | Current: ${current_price:,.2f}<br>
+                    Margin PnL: <span style="color: {color}; font-weight: bold;">{sign}${pnl_usd:.2f} ({sign}{roi_pct:.1f}% ROI)</span>
+                </div>
+                <div>
+                    <a href="/close?symbol={sym}" style="background: #da3633; color: white; padding: 8px 12px; text-decoration: none; border-radius: 4px; font-weight: bold; font-size: 12px;">❌ Close Now</a>
+                </div>
             </div>
             """
     else:
         positions_html = f"<i>No open {LEVERAGE}x scalps. Scanning markets...</i>"
 
-    # Show active cooldowns on dashboard
     now = datetime.now()
     active_cooldowns = [sym for sym, exp in logger.symbol_cooldowns.items() if exp > now]
     cooldowns_text = f"<b>Locked Symbols ({len(active_cooldowns)}):</b> " + (", ".join(active_cooldowns) if active_cooldowns else "None")
@@ -116,7 +156,7 @@ def dashboard():
     <!DOCTYPE html>
     <html>
     <head>
-        <title>Trading-blue: {LEVERAGE}x Cooldown Desk</title>
+        <title>Trading-blue: Manual & Auto Desk</title>
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <meta http-equiv="refresh" content="2">
         <style>
@@ -129,7 +169,7 @@ def dashboard():
         </style>
     </head>
     <body>
-        <h2>⚡ Trading-blue: {LEVERAGE}x Leverage Scalper</h2>
+        <h2>⚡ Trading-blue: Manual & Auto Scalper</h2>
         
         <div class="card">
             <div>Virtual Equity Pool</div>
@@ -165,7 +205,6 @@ async def market_watcher_worker():
         while True:
             try:
                 now = datetime.now()
-                # Clean up expired cooldowns
                 logger.symbol_cooldowns = {sym: exp for sym, exp in logger.symbol_cooldowns.items() if exp > now}
 
                 live_prices = {}
@@ -187,7 +226,7 @@ async def market_watcher_worker():
                     await asyncio.sleep(1)
                     continue
 
-                # --- 1. MANAGEMENT OF ACTIVE POSITIONS ---
+                # --- 1. AUTOMATED RISK MANAGEMENT ---
                 open_symbols = list(logger.open_positions.keys())
                 for symbol in open_symbols:
                     pos = logger.open_positions[symbol]
@@ -235,21 +274,18 @@ async def market_watcher_worker():
                             logger.equity += pnl_usd
 
                             logger.open_positions.pop(symbol, None)
-                            
-                            # APPLY 5-HOUR COOLDOWN TO THIS SYMBOL (whether win or loss)
                             logger.symbol_cooldowns[symbol] = datetime.now() + timedelta(hours=COOLDOWN_HOURS)
 
                             sign = "+" if pnl_usd >= 0 else ""
                             await logger.log(
                                 f"{LEVERAGE}X-SCALP",
-                                f"CLOSED {LEVERAGE}x {side} {symbol} {reason} · {sign}${pnl_usd:.2f} USDT | Cooldown: 5h | Equity: ${logger.equity:.2f}",
+                                f"CLOSED auto {LEVERAGE}x {side} {symbol} {reason} · {sign}${pnl_usd:.2f} USDT | Cooldown: 5h | Equity: ${logger.equity:.2f}",
                                 alert_telegram=True,
                             )
 
-                # --- 2. ENTRY SCANNER WITH COOLDOWN CHECK ---
+                # --- 2. ENTRY SCANNER ---
                 if len(logger.open_positions) < MAX_OPEN_POSITIONS:
                     for symbol, current_price in live_prices.items():
-                        # Skip if already in open positions OR currently locked in 5-hour cooldown
                         if symbol in logger.open_positions or symbol in logger.symbol_cooldowns:
                             continue
 
