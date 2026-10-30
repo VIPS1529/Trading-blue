@@ -8,11 +8,11 @@ from fastapi.responses import HTMLResponse
 app = FastAPI()
 
 # ==========================================
-# CONFIGURATION & KUCOIN MULTI-ASSET PARAMS
+# CONFIGURATION & HIGH-SPEED MULTI-POS PARAMS
 # ==========================================
 INITIAL_EQUITY = 50.00           # Starting virtual balance ($50.00)
 FIXED_POSITION_USD = 5.00        # Fixed size per trade ($5.00)
-MAX_OPEN_POSITIONS = 1           # Only hold 1 position at a time
+MAX_OPEN_POSITIONS = 3           # Increased to 3 simultaneous trades!
 
 # KuCoin trading pairs format (Base-Quote)
 TRADING_PAIRS = ["BTC-USDT", "ETH-USDT", "SOL-USDT", "BNB-USDT", "XRP-USDT", "ADA-USDT"]
@@ -33,7 +33,7 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 class CloudDeskLogger:
     def __init__(self):
         self.equity = INITIAL_EQUITY
-        self.open_position = None    # Active trade dictionary or None
+        self.open_positions = {}     # Dictionary tracking active positions by symbol
         self.price_histories = {pair: [] for pair in TRADING_PAIRS}
         self.scanned_count = 0
         self.traded_count = 0
@@ -71,21 +71,21 @@ logger = CloudDeskLogger()
 @app.head("/")
 def dashboard():
     logs_html = "".join([f"<li>{log}</li>" for log in logger.activity_logs])
-    position_html = ""
+    positions_html = ""
     
-    if logger.open_position:
-        pos = logger.open_position
-        position_html = f"<b>{pos['side']} {pos['symbol']}</b> | Entry: ${pos['entry_price']:,.2f} | Peak: ${pos['peak_price']:,.2f}"
+    if logger.open_positions:
+        for sym, pos in logger.open_positions.items():
+            positions_html += f"<b>{pos['side']} {sym}</b> | Entry: ${pos['entry_price']:,.2f} | Peak: ${pos['peak_price']:,.2f}<br>"
     else:
-        position_html = f"<i>No open positions. Scanning KuCoin for {len(TRADING_PAIRS)} major pairs...</i>"
+        positions_html = f"<i>No open positions. High-speed scanning {len(TRADING_PAIRS)} pairs (Max 3 Trades)...</i>"
 
     html_content = f"""
     <!DOCTYPE html>
     <html>
     <head>
-        <title>Trading-blue: KuCoin Multi-Asset Desk</title>
+        <title>Trading-blue: High-Speed Multi-Pos Desk</title>
         <meta name="viewport" content="width=device-width, initial-scale=1">
-        <meta http-equiv="refresh" content="10">
+        <meta http-equiv="refresh" content="5">
         <style>
             body {{ background-color: #0d1117; color: #c9d1d9; font-family: -apple-system, BlinkMacSystemFont, sans-serif; padding: 20px; margin: 0; }}
             .card {{ background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 15px; margin-bottom: 15px; }}
@@ -96,7 +96,7 @@ def dashboard():
         </style>
     </head>
     <body>
-        <h2>⚡ Trading-blue: KuCoin Multi-Asset Desk</h2>
+        <h2>⚡ Trading-blue: High-Speed Multi-Pos Desk</h2>
         
         <div class="card">
             <div>Virtual Equity Pool</div>
@@ -109,12 +109,12 @@ def dashboard():
         </div>
 
         <div class="card">
-            <div>Active Open Position</div>
-            <div>{position_html}</div>
+            <div>Active Open Positions ({len(logger.open_positions)}/3)</div>
+            <div>{positions_html}</div>
         </div>
 
         <div class="card">
-            <div>Live Activity Logs (Auto-refreshes every 10s)</div>
+            <div>Live Activity Logs (Auto-refreshes every 5s)</div>
             <ul>{logs_html if logs_html else "<li>Waiting for market data...</li>"}</ul>
         </div>
     </body>
@@ -124,7 +124,7 @@ def dashboard():
 
 
 # ==========================================
-# KUCOIN MARKET WATCHER WORKER
+# HIGH-SPEED KUCOIN MARKET WATCHER WORKER
 # ==========================================
 async def market_watcher_worker():
     async with aiohttp.ClientSession() as session:
@@ -132,9 +132,8 @@ async def market_watcher_worker():
             try:
                 live_prices = {}
                 for symbol in TRADING_PAIRS:
-                    # KuCoin public ticker endpoint
                     url = f"https://api.kucoin.com/api/v1/market/orderbook/level1?symbol={symbol}"
-                    async with session.get(url, timeout=4) as resp:
+                    async with session.get(url, timeout=3) as resp:
                         if resp.status == 200:
                             data = await resp.json()
                             if data.get("code") == "200000" and data.get("data"):
@@ -142,16 +141,16 @@ async def market_watcher_worker():
                                 if price_str:
                                     live_prices[symbol] = float(price_str)
                                     logger.scanned_count += 1
-                    await asyncio.sleep(0.3) # Rate-limit padding for API stability
+                    await asyncio.sleep(0.1) # Accelerated scan speed
 
                 if not live_prices:
-                    await asyncio.sleep(5)
+                    await asyncio.sleep(2)
                     continue
 
-                # --- 1. MANAGEMENT OF OPEN POSITION ---
-                if logger.open_position:
-                    pos = logger.open_position
-                    symbol = pos["symbol"]
+                # --- 1. MANAGEMENT OF OPEN POSITIONS ---
+                open_symbols = list(logger.open_positions.keys())
+                for symbol in open_symbols:
+                    pos = logger.open_positions[symbol]
                     current_price = live_prices.get(symbol, 0)
                     
                     if current_price > 0:
@@ -193,7 +192,7 @@ async def market_watcher_worker():
                             pnl_pct_final = (pnl_usd / pos["size_usd"]) * 100
                             logger.equity += pnl_usd
 
-                            logger.open_position = None
+                            logger.open_positions.pop(symbol, None)
                             sign = "+" if pnl_usd >= 0 else ""
                             await logger.log(
                                 "RISK",
@@ -201,51 +200,47 @@ async def market_watcher_worker():
                                 alert_telegram=True,
                             )
 
-                # --- 2. MULTI-ASSET ENTRY SCANNER (If no position open) ---
-                else:
-                    best_candidate = None
-                    best_score = 0.0
-                    chosen_side = ""
-
+                # --- 2. HIGH-SPEED MULTI-POSITION ENTRY SCANNER ---
+                if len(logger.open_positions) < MAX_OPEN_POSITIONS:
                     for symbol, current_price in live_prices.items():
+                        # Skip if already holding this symbol
+                        if symbol in logger.open_positions:
+                            continue
+
                         history = logger.price_histories[symbol]
                         history.append(current_price)
-                        if len(history) > 5:
+                        if len(history) > 3: # Reduced tick history requirement for faster triggers
                             history.pop(0)
 
-                        if len(history) >= 5:
+                        if len(history) >= 3:
                             price_start = history[0]
                             price_end = history[-1]
                             momentum_pct = ((price_end - price_start) / price_start) * 100
 
-                            # Look for the strongest momentum setup
-                            if abs(momentum_pct) > 0.03 and abs(momentum_pct) > best_score:
-                                best_score = abs(momentum_pct)
-                                best_candidate = symbol
+                            # Lowered momentum sensitivity to 0.02% for faster high-frequency testing
+                            if abs(momentum_pct) > 0.02:
                                 chosen_side = "LONG" if momentum_pct > 0 else "SHORT"
 
-                    # Open position on the top momentum asset found
-                    if best_candidate and logger.equity >= FIXED_POSITION_USD:
-                        current_price = live_prices[best_candidate]
-                        logger.open_position = {
-                            "symbol": best_candidate,
-                            "side": chosen_side,
-                            "entry_price": current_price,
-                            "peak_price": current_price,
-                            "size_usd": FIXED_POSITION_USD,
-                            "trailing_active": False,
-                        }
-                        logger.traded_count += 1
-                        await logger.log(
-                            "EXECUTOR",
-                            f"OPENED {chosen_side} {best_candidate} · size ${FIXED_POSITION_USD:.2f} @ ${current_price:,.2f}",
-                            alert_telegram=True,
-                        )
+                                if logger.equity >= FIXED_POSITION_USD and len(logger.open_positions) < MAX_OPEN_POSITIONS:
+                                    logger.open_positions[symbol] = {
+                                        "symbol": symbol,
+                                        "side": chosen_side,
+                                        "entry_price": current_price,
+                                        "peak_price": current_price,
+                                        "size_usd": FIXED_POSITION_USD,
+                                        "trailing_active": False,
+                                    }
+                                    logger.traded_count += 1
+                                    await logger.log(
+                                        "EXECUTOR",
+                                        f"OPENED {chosen_side} {symbol} · size ${FIXED_POSITION_USD:.2f} @ ${current_price:,.2f}",
+                                        alert_telegram=True,
+                                    )
 
             except Exception as e:
-                await logger.log("WATCHER", f"KuCoin scan error: {e}")
+                await logger.log("WATCHER", f"Scan error: {e}")
 
-            await asyncio.sleep(4)
+            await asyncio.sleep(1.5) # Much faster check loop (every 1.5 seconds)
 
 
 @app.on_event("startup")
