@@ -15,14 +15,18 @@ MARGIN_SIZE_USD = 20.00          # Margin per trade ($20.00 collateral)
 LEVERAGE = 40                    # 40x Leverage
 POSITION_VOLUME_USD = MARGIN_SIZE_USD * LEVERAGE  # $800.00 total volume per trade
 MAX_OPEN_POSITIONS = 2           # Max 2 concurrent high-leverage scalps
-COOLDOWN_HOURS = 5               # 5-hour cooldown for any closed symbol
+COOLDOWN_HOURS = 5               # 5-hour standard cooldown for closed symbols
+
+# High-Probability Exception Rule
+HIGH_PROB_THRESHOLD = 0.035      # If momentum > 0.035%, bypass cooldown
 
 TRADING_PAIRS = ["BTC-USDT", "ETH-USDT", "SOL-USDT", "BNB-USDT", "XRP-USDT", "ADA-USDT"]
 
-# Ultra-Tight Scalping Risk Engine for 40x Leverage
+# Ultra-Tight Scalping Risk Engine & Fast-Lock Strategy
 STOP_LOSS_PCT = -0.5             # Asset move -0.5% = -20% margin loss hard stop
-TRAIL_ACTIVATION_PCT = 0.25      # Activate trailing profit at +0.25% asset move (+10% ROI)
-TRAIL_DROP_PCT = 0.1             # Secure profit when price drops 0.1% from peak
+TRAIL_ACTIVATION_PCT = 0.20      # Faster activation at +0.20% asset move (~8% ROI)
+FAST_LOCK_ROI = 5.0              # Fast-Lock: If trade hits +5% ROI instantly, trigger hyper-tight protection!
+TRAIL_DROP_PCT = 0.08            # Ultra-tight drop threshold to lock gains immediately
 
 # Telegram Credentials
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -103,7 +107,7 @@ async def manual_close(symbol: str = Query(...)):
 
 
 # ==========================================
-# VISUAL DASHBOARD ROUTE (DYNAMIC GREEN/RED UI)
+# VISUAL DASHBOARD ROUTE
 # ==========================================
 @app.get("/", response_class=HTMLResponse)
 @app.head("/")
@@ -128,7 +132,6 @@ def dashboard():
             pnl_usd = (pos["margin_usd"] * leveraged_multiplier) - pos["margin_usd"]
             roi_pct = (pnl_usd / pos["margin_usd"]) * 100
 
-            # Dynamic color assignments
             is_profit = pnl_usd >= 0
             color = "#3fb950" if is_profit else "#f85149"
             bg_color = "rgba(63, 185, 80, 0.08)" if is_profit else "rgba(248, 81, 73, 0.08)"
@@ -157,7 +160,7 @@ def dashboard():
     <!DOCTYPE html>
     <html>
     <head>
-        <title>Trading-blue: Manual & Auto Desk</title>
+        <title>Trading-blue: Fast-Lock Scalper Desk</title>
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <meta http-equiv="refresh" content="2">
         <style>
@@ -170,7 +173,7 @@ def dashboard():
         </style>
     </head>
     <body>
-        <h2>⚡ Trading-blue: Manual & Auto Scalper</h2>
+        <h2>⚡ Trading-blue: Fast-Lock Scalper</h2>
         
         <div class="card">
             <div>Virtual Equity Pool</div>
@@ -199,7 +202,7 @@ def dashboard():
 
 
 # ==========================================
-# 40X LEVERAGE SCALPER ENGINE WORKER
+# 40X LEVERAGE FAST-LOCK ENGINE WORKER
 # ==========================================
 async def market_watcher_worker():
     async with aiohttp.ClientSession() as session:
@@ -227,7 +230,7 @@ async def market_watcher_worker():
                     await asyncio.sleep(1)
                     continue
 
-                # --- 1. AUTOMATED RISK MANAGEMENT ---
+                # --- 1. AUTOMATED RISK MANAGEMENT WITH FAST-LOCK ---
                 open_symbols = list(logger.open_positions.keys())
                 for symbol in open_symbols:
                     pos = logger.open_positions[symbol]
@@ -250,6 +253,13 @@ async def market_watcher_worker():
 
                         leveraged_pnl_pct = asset_pct * LEVERAGE
 
+                        # Fast-Lock Trigger: If ROI hits +5% quickly, activate hyper-tight trailing stop
+                        if not pos["fast_locked"] and leveraged_pnl_pct >= FAST_LOCK_ROI:
+                            pos["fast_locked"] = True
+                            pos["trailing_active"] = True
+                            await logger.log(f"{LEVERAGE}X-FASTLOCK", f"${symbol} {side} hit +{leveraged_pnl_pct:.1f}% ROI · Fast-Lock Armed!")
+
+                        # Standard Trailing Activation Trigger (+10% ROI)
                         if not pos["trailing_active"] and leveraged_pnl_pct >= 10.0:
                             pos["trailing_active"] = True
                             await logger.log(f"{LEVERAGE}X-SCALP", f"${symbol} {side} hit +{leveraged_pnl_pct:.1f}% ROI · Target Lock Active")
@@ -259,6 +269,10 @@ async def market_watcher_worker():
                         if leveraged_pnl_pct <= -15.0:
                             should_close = True
                             reason = "hard stop (-15% ROI)"
+                        elif pos["fast_locked"] and drop_from_peak >= TRAIL_DROP_PCT:
+                            # Fast-lock exit: secures profit immediately upon slight pullback
+                            should_close = True
+                            reason = f"Fast-Lock profit secured (+{leveraged_pnl_pct:.1f}% ROI)"
                         elif pos["trailing_active"] and (drop_from_peak * LEVERAGE) >= 2.0:
                             should_close = True
                             reason = "scalp profit secured (>=10% ROI)"
@@ -284,10 +298,10 @@ async def market_watcher_worker():
                                 alert_telegram=True,
                             )
 
-                # --- 2. ENTRY SCANNER ---
+                # --- 2. ENTRY SCANNER WITH HIGH-PROBABILITY BYPASS ---
                 if len(logger.open_positions) < MAX_OPEN_POSITIONS:
                     for symbol, current_price in live_prices.items():
-                        if symbol in logger.open_positions or symbol in logger.symbol_cooldowns:
+                        if symbol in logger.open_positions:
                             continue
 
                         history = logger.price_histories[symbol]
@@ -299,11 +313,24 @@ async def market_watcher_worker():
                             price_start = history[0]
                             price_end = history[-1]
                             momentum_pct = ((price_end - price_start) / price_start) * 100
+                            abs_momentum = abs(momentum_pct)
 
-                            if abs(momentum_pct) > 0.01:
+                            is_in_cooldown = symbol in logger.symbol_cooldowns
+                            is_high_probability = abs_momentum >= HIGH_PROB_THRESHOLD
+
+                            can_trade = False
+                            if not is_in_cooldown and abs_momentum > 0.01:
+                                can_trade = True
+                            elif is_in_cooldown and is_high_probability:
+                                can_trade = True
+
+                            if can_trade:
                                 chosen_side = "LONG" if momentum_pct > 0 else "SHORT"
 
                                 if logger.equity >= MARGIN_SIZE_USD and len(logger.open_positions) < MAX_OPEN_POSITIONS:
+                                    if symbol in logger.symbol_cooldowns:
+                                        logger.symbol_cooldowns.pop(symbol, None)
+
                                     logger.open_positions[symbol] = {
                                         "symbol": symbol,
                                         "side": chosen_side,
@@ -312,11 +339,12 @@ async def market_watcher_worker():
                                         "margin_usd": MARGIN_SIZE_USD,
                                         "volume_usd": POSITION_VOLUME_USD,
                                         "trailing_active": False,
+                                        "fast_locked": False, # Fast-lock tracking flag
                                     }
                                     logger.traded_count += 1
                                     await logger.log(
                                         f"{LEVERAGE}X-SCALP",
-                                        f"OPENED {LEVERAGE}x {chosen_side} {symbol} · Margin: ${MARGIN_SIZE_USD:.2f} (Vol: ${POSITION_VOLUME_USD:,.0f}) @ ${current_price:,.2f}",
+                                        f"OPENED {LEVERAGE}x {chosen_side} {symbol} (High-Prob Setup) · Margin: ${MARGIN_SIZE_USD:.2f} @ ${current_price:,.2f}",
                                         alert_telegram=True,
                                     )
 
