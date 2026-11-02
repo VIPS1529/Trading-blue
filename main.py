@@ -8,24 +8,26 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 app = FastAPI()
 
 # ==========================================
-# CONFIGURATION & 40X LEVERAGE PARAMETERS
+# CONFIGURATION & INSTITUTIONAL PARAMETERS
 # ==========================================
 INITIAL_EQUITY = 50.00           # Starting virtual balance ($50.00)
 LEVERAGE = 40                    # 40x Leverage
 MAX_OPEN_POSITIONS = 2           # Max 2 concurrent high-leverage scalps
 COOLDOWN_HOURS = 5               # 5-hour standard cooldown for closed symbols
 
-# Feature 1: Dynamic Compounding Sizing (% of equity per trade)
+# Dynamic Compounding Sizing (% of equity per trade)
 EQUITY_ALLOCATION_PCT = 0.40     # Risk 40% of current virtual equity per trade
 
-# Feature 2 & High-Probability Filters
+# Risk Minimization: Daily Circuit Breaker
+MAX_DAILY_DRAWDOWN_PCT = 15.0    # If equity drops 15% from daily start, pause trading!
+
 HIGH_PROB_THRESHOLD = 0.035      # If momentum > 0.035%, bypass cooldown
 TRADING_PAIRS = ["BTC-USDT", "ETH-USDT", "SOL-USDT", "BNB-USDT", "XRP-USDT", "ADA-USDT"]
 
-# Feature 4: Multi-Stage Trailing Ratchet & Risk Engine
+# Multi-Stage Trailing Ratchet & Risk Engine
 STOP_LOSS_PCT = -0.35            # Tightened hard stop (~-14% margin loss)
 FAST_LOCK_ROI = 8.0              # Fast-Lock armed at +8% ROI
-TAKE_PROFIT_ROI = 15.0           # Target Profit: 15% ROI (~$3.00+ profit per win)
+TAKE_PROFIT_ROI = 15.0           # Target Profit: 15% ROI
 TRAIL_DROP_PCT = 0.08            # Ultra-tight drop threshold to protect gains
 
 # Telegram Credentials
@@ -39,6 +41,10 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 class CloudDeskLogger:
     def __init__(self):
         self.equity = INITIAL_EQUITY
+        self.daily_start_equity = INITIAL_EQUITY
+        self.last_equity_reset = datetime.now().date()
+        self.trading_halted = False
+        
         self.open_positions = {}         # symbol -> position dict
         self.symbol_cooldowns = {}       # symbol -> expiration datetime
         self.latest_prices = {}          # symbol -> current live price
@@ -155,12 +161,13 @@ def dashboard():
     now = datetime.now()
     active_cooldowns = [sym for sym, exp in logger.symbol_cooldowns.items() if exp > now]
     cooldowns_text = f"<b>Locked Symbols ({len(active_cooldowns)}):</b> " + (", ".join(active_cooldowns) if active_cooldowns else "None")
+    halt_status = "<span style='color: #f85149; font-weight: bold;'>HALTED (Circuit Breaker Active)</span>" if logger.trading_halted else "<span style='color: #3fb950;'>ACTIVE (Protected)</span>"
 
     html_content = f"""
     <!DOCTYPE html>
     <html>
     <head>
-        <title>Trading-blue: Fully Loaded Desk</title>
+        <title>Trading-blue: Institutional Risk Desk</title>
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <meta http-equiv="refresh" content="2">
         <style>
@@ -173,10 +180,10 @@ def dashboard():
         </style>
     </head>
     <body>
-        <h2>⚡ Trading-blue: Advanced Scalper (1-4 Active)</h2>
+        <h2>⚡ Trading-blue: Institutional Risk Scalper</h2>
         
         <div class="card">
-            <div>Virtual Equity Pool</div>
+            <div>Virtual Equity Pool | Status: {halt_status}</div>
             <div class="metric">${logger.equity:.2f}</div>
         </div>
 
@@ -202,13 +209,28 @@ def dashboard():
 
 
 # ==========================================
-# ADVANCED MULTI-FEATURE ENGINE WORKER
+# INSTITUTIONAL ENGINE WORKER
 # ==========================================
 async def market_watcher_worker():
     async with aiohttp.ClientSession() as session:
         while True:
             try:
                 now = datetime.now()
+                today = now.date()
+
+                # Reset daily equity baseline if a new day starts
+                if today != logger.last_equity_reset:
+                    logger.daily_start_equity = logger.equity
+                    logger.last_equity_reset = today
+                    logger.trading_halted = False
+                    await logger.log("RISK", f"New trading day. Daily baseline equity reset to ${logger.equity:.2f}")
+
+                # Check Daily Drawdown Circuit Breaker
+                daily_drop_pct = ((logger.daily_start_equity - logger.equity) / logger.daily_start_equity) * 100
+                if daily_drop_pct >= MAX_DAILY_DRAWDOWN_PCT and not logger.trading_halted:
+                    logger.trading_halted = True
+                    await logger.log("CIRCUIT-BREAKER", f"MAX DAILY DRAWDOWN REACHED (-{daily_drop_pct:.1f}%). Trading halted to protect capital!", alert_telegram=True)
+
                 logger.symbol_cooldowns = {sym: exp for sym, exp in logger.symbol_cooldowns.items() if exp > now}
 
                 live_prices = {}
@@ -230,7 +252,7 @@ async def market_watcher_worker():
                     await asyncio.sleep(1)
                     continue
 
-                # --- 1. AUTOMATED RISK MANAGEMENT & RATCLIFFE RATETCH ---
+                # --- 1. AUTOMATED RISK MANAGEMENT & RATCHET ---
                 open_symbols = list(logger.open_positions.keys())
                 for symbol in open_symbols:
                     pos = logger.open_positions[symbol]
@@ -253,21 +275,14 @@ async def market_watcher_worker():
 
                         leveraged_pnl_pct = asset_pct * LEVERAGE
 
-                        # Ratchet Stage 1: Breakeven Lock at +5% ROI
-                        if not pos["stage1_locked"] and leveraged_pnl_pct >= 5.0:
-                            pos["stage1_locked"] = True
-                            await logger.log(f"{LEVERAGE}X-RATCHET", f"${symbol} {side} hit +5% ROI · Breakeven protection armed")
-
-                        # Ratchet Stage 2 (Fast-Lock): Armed at +8% ROI
                         if not pos["fast_locked"] and leveraged_pnl_pct >= FAST_LOCK_ROI:
                             pos["fast_locked"] = True
                             pos["trailing_active"] = True
-                            await logger.log(f"{LEVERAGE}X-FASTLOCK", f"${symbol} {side} hit +8% ROI · Fast-Lock Armed!")
+                            await logger.log(f"{LEVERAGE}X-FASTLOCK", f"${symbol} {side} hit +{leveraged_pnl_pct:.1f}% ROI · Fast-Lock Armed!")
 
-                        # Ratchet Stage 3 (Take-Profit Target): Triggered at +15% ROI
                         if not pos["trailing_active"] and leveraged_pnl_pct >= TAKE_PROFIT_ROI:
                             pos["trailing_active"] = True
-                            await logger.log(f"{LEVERAGE}X-SCALP", f"${symbol} {side} hit +15% ROI · Target Lock Active")
+                            await logger.log(f"{LEVERAGE}X-SCALP", f"${symbol} {side} hit +{leveraged_pnl_pct:.1f}% ROI · Target Lock Active")
 
                         should_close = False
                         reason = ""
@@ -302,8 +317,8 @@ async def market_watcher_worker():
                                 alert_telegram=True,
                             )
 
-                # --- 2. ENTRY SCANNER WITH DYNAMIC COMPOUNDING & FILTERS ---
-                if len(logger.open_positions) < MAX_OPEN_POSITIONS:
+                # --- 2. ENTRY SCANNER (ONLY IF CIRCUIT BREAKER IS CLEAR) ---
+                if not logger.trading_halted and len(logger.open_positions) < MAX_OPEN_POSITIONS:
                     for symbol, current_price in live_prices.items():
                         if symbol in logger.open_positions:
                             continue
@@ -322,7 +337,6 @@ async def market_watcher_worker():
                             is_in_cooldown = symbol in logger.symbol_cooldowns
                             is_high_probability = abs_momentum >= HIGH_PROB_THRESHOLD
 
-                            # Feature 2 & 3: Filter check (valid momentum + cooldown or high-prob bypass)
                             can_trade = False
                             if not is_in_cooldown and abs_momentum > 0.01:
                                 can_trade = True
@@ -332,9 +346,15 @@ async def market_watcher_worker():
                             if can_trade:
                                 chosen_side = "LONG" if momentum_pct > 0 else "SHORT"
 
-                                # Feature 1: Dynamic Compounding Margin Size based on current equity
+                                # Trend Alignment Filter: Compare short-term tick with mid-term history baseline
+                                baseline_price = sum(history) / len(history)
+                                if chosen_side == "LONG" and current_price < baseline_price:
+                                    continue # Skip long if fighting the local trend
+                                if chosen_side == "SHORT" and current_price > baseline_price:
+                                    continue # Skip short if fighting the local trend
+
                                 dynamic_margin = round(logger.equity * EQUITY_ALLOCATION_PCT, 2)
-                                if dynamic_margin < 5.0: # Minimum safety floor
+                                if dynamic_margin < 5.0:
                                     dynamic_margin = 5.0
                                 dynamic_volume = dynamic_margin * LEVERAGE
 
@@ -349,14 +369,13 @@ async def market_watcher_worker():
                                         "peak_price": current_price,
                                         "margin_usd": dynamic_margin,
                                         "volume_usd": dynamic_volume,
-                                        "stage1_locked": False,
                                         "fast_locked": False,
                                         "trailing_active": False,
                                     }
                                     logger.traded_count += 1
                                     await logger.log(
                                         f"{LEVERAGE}X-SCALP",
-                                        f"OPENED {LEVERAGE}x {chosen_side} {symbol} (Compounded) · Margin: ${dynamic_margin:.2f} (Vol: ${dynamic_volume:,.0f}) @ ${current_price:,.2f}",
+                                        f"OPENED {LEVERAGE}x {chosen_side} {symbol} (Trend-Aligned) · Margin: ${dynamic_margin:.2f} @ ${current_price:,.2f}",
                                         alert_telegram=True,
                                     )
 
