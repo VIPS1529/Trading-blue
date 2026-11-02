@@ -8,7 +8,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 app = FastAPI()
 
 # ==========================================
-# CONFIGURATION & 40X LEVERAGE PARAMETERS
+# CONFIGURATION & OPTIMIZED RISK PARAMETERS
 # ==========================================
 INITIAL_EQUITY = 50.00           # Starting virtual balance ($50.00)
 MARGIN_SIZE_USD = 20.00          # Margin per trade ($20.00 collateral)
@@ -22,11 +22,12 @@ HIGH_PROB_THRESHOLD = 0.035      # If momentum > 0.035%, bypass cooldown
 
 TRADING_PAIRS = ["BTC-USDT", "ETH-USDT", "SOL-USDT", "BNB-USDT", "XRP-USDT", "ADA-USDT"]
 
-# Ultra-Tight Scalping Risk Engine & Fast-Lock Strategy
-STOP_LOSS_PCT = -0.5             # Asset move -0.5% = -20% margin loss hard stop
-TRAIL_ACTIVATION_PCT = 0.20      # Faster activation at +0.20% asset move (~8% ROI)
-FAST_LOCK_ROI = 5.0              # Fast-Lock: If trade hits +5% ROI instantly, trigger hyper-tight protection!
-TRAIL_DROP_PCT = 0.08            # Ultra-tight drop threshold to lock gains immediately
+# Optimized Risk-Reward Engine for 40x Leverage
+STOP_LOSS_PCT = -0.35            # Tightened hard stop (-0.35% asset move = -14% to -15% margin loss)
+TRAIL_ACTIVATION_PCT = 0.20      # Trail activation at +0.20% asset move (~8% ROI)
+FAST_LOCK_ROI = 8.0              # Fast-Lock: Armed at +8% ROI to lock gains early
+TAKE_PROFIT_ROI = 15.0           # Target Profit: 15% ROI (~$3.00 profit per win)
+TRAIL_DROP_PCT = 0.08            # Ultra-tight drop threshold to protect gains
 
 # Telegram Credentials
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -160,7 +161,7 @@ def dashboard():
     <!DOCTYPE html>
     <html>
     <head>
-        <title>Trading-blue: Fast-Lock Scalper Desk</title>
+        <title>Trading-blue: Optimized Risk Scalper</title>
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <meta http-equiv="refresh" content="2">
         <style>
@@ -173,7 +174,7 @@ def dashboard():
         </style>
     </head>
     <body>
-        <h2>⚡ Trading-blue: Fast-Lock Scalper</h2>
+        <h2>⚡ Trading-blue: Optimized Risk Scalper</h2>
         
         <div class="card">
             <div>Virtual Equity Pool</div>
@@ -202,7 +203,7 @@ def dashboard():
 
 
 # ==========================================
-# 40X LEVERAGE FAST-LOCK ENGINE WORKER
+# 40X LEVERAGE OPTIMIZED ENGINE WORKER
 # ==========================================
 async def market_watcher_worker():
     async with aiohttp.ClientSession() as session:
@@ -230,7 +231,7 @@ async def market_watcher_worker():
                     await asyncio.sleep(1)
                     continue
 
-                # --- 1. AUTOMATED RISK MANAGEMENT WITH FAST-LOCK ---
+                # --- 1. AUTOMATED RISK MANAGEMENT WITH OPTIMIZED TARGETS ---
                 open_symbols = list(logger.open_positions.keys())
                 for symbol in open_symbols:
                     pos = logger.open_positions[symbol]
@@ -253,29 +254,28 @@ async def market_watcher_worker():
 
                         leveraged_pnl_pct = asset_pct * LEVERAGE
 
-                        # Fast-Lock Trigger: If ROI hits +5% quickly, activate hyper-tight trailing stop
+                        # Fast-Lock Trigger at +8% ROI
                         if not pos["fast_locked"] and leveraged_pnl_pct >= FAST_LOCK_ROI:
                             pos["fast_locked"] = True
                             pos["trailing_active"] = True
                             await logger.log(f"{LEVERAGE}X-FASTLOCK", f"${symbol} {side} hit +{leveraged_pnl_pct:.1f}% ROI · Fast-Lock Armed!")
 
-                        # Standard Trailing Activation Trigger (+10% ROI)
-                        if not pos["trailing_active"] and leveraged_pnl_pct >= 10.0:
+                        # Take-Profit Target Trigger at +15% ROI (~$3.00 profit)
+                        if not pos["trailing_active"] and leveraged_pnl_pct >= TAKE_PROFIT_ROI:
                             pos["trailing_active"] = True
                             await logger.log(f"{LEVERAGE}X-SCALP", f"${symbol} {side} hit +{leveraged_pnl_pct:.1f}% ROI · Target Lock Active")
 
                         should_close = False
                         reason = ""
-                        if leveraged_pnl_pct <= -15.0:
+                        if leveraged_pnl_pct <= -14.0: # Hard stop cap
                             should_close = True
-                            reason = "hard stop (-15% ROI)"
+                            reason = "hard stop (-14% ROI)"
                         elif pos["fast_locked"] and drop_from_peak >= TRAIL_DROP_PCT:
-                            # Fast-lock exit: secures profit immediately upon slight pullback
                             should_close = True
                             reason = f"Fast-Lock profit secured (+{leveraged_pnl_pct:.1f}% ROI)"
                         elif pos["trailing_active"] and (drop_from_peak * LEVERAGE) >= 2.0:
                             should_close = True
-                            reason = "scalp profit secured (>=10% ROI)"
+                            reason = f"scalp profit secured (>={TAKE_PROFIT_ROI}% ROI)"
 
                         if should_close:
                             if side == "LONG":
@@ -339,7 +339,7 @@ async def market_watcher_worker():
                                         "margin_usd": MARGIN_SIZE_USD,
                                         "volume_usd": POSITION_VOLUME_USD,
                                         "trailing_active": False,
-                                        "fast_locked": False, # Fast-lock tracking flag
+                                    "fast_locked": False,
                                     }
                                     logger.traded_count += 1
                                     await logger.log(
