@@ -8,25 +8,24 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 app = FastAPI()
 
 # ==========================================
-# CONFIGURATION & OPTIMIZED RISK PARAMETERS
+# CONFIGURATION & 40X LEVERAGE PARAMETERS
 # ==========================================
 INITIAL_EQUITY = 50.00           # Starting virtual balance ($50.00)
-MARGIN_SIZE_USD = 20.00          # Margin per trade ($20.00 collateral)
 LEVERAGE = 40                    # 40x Leverage
-POSITION_VOLUME_USD = MARGIN_SIZE_USD * LEVERAGE  # $800.00 total volume per trade
 MAX_OPEN_POSITIONS = 2           # Max 2 concurrent high-leverage scalps
 COOLDOWN_HOURS = 5               # 5-hour standard cooldown for closed symbols
 
-# High-Probability Exception Rule
-HIGH_PROB_THRESHOLD = 0.035      # If momentum > 0.035%, bypass cooldown
+# Feature 1: Dynamic Compounding Sizing (% of equity per trade)
+EQUITY_ALLOCATION_PCT = 0.40     # Risk 40% of current virtual equity per trade
 
+# Feature 2 & High-Probability Filters
+HIGH_PROB_THRESHOLD = 0.035      # If momentum > 0.035%, bypass cooldown
 TRADING_PAIRS = ["BTC-USDT", "ETH-USDT", "SOL-USDT", "BNB-USDT", "XRP-USDT", "ADA-USDT"]
 
-# Optimized Risk-Reward Engine for 40x Leverage
-STOP_LOSS_PCT = -0.35            # Tightened hard stop (-0.35% asset move = -14% to -15% margin loss)
-TRAIL_ACTIVATION_PCT = 0.20      # Trail activation at +0.20% asset move (~8% ROI)
-FAST_LOCK_ROI = 8.0              # Fast-Lock: Armed at +8% ROI to lock gains early
-TAKE_PROFIT_ROI = 15.0           # Target Profit: 15% ROI (~$3.00 profit per win)
+# Feature 4: Multi-Stage Trailing Ratchet & Risk Engine
+STOP_LOSS_PCT = -0.35            # Tightened hard stop (~-14% margin loss)
+FAST_LOCK_ROI = 8.0              # Fast-Lock armed at +8% ROI
+TAKE_PROFIT_ROI = 15.0           # Target Profit: 15% ROI (~$3.00+ profit per win)
 TRAIL_DROP_PCT = 0.08            # Ultra-tight drop threshold to protect gains
 
 # Telegram Credentials
@@ -142,8 +141,8 @@ def dashboard():
             <div style="background: {bg_color}; border: 1px solid {color}; border-left: 5px solid {color}; padding: 12px; margin-bottom: 10px; border-radius: 6px; display: flex; justify-content: space-between; align-items: center;">
                 <div>
                     <b>{LEVERAGE}x {side} {sym}</b> (${pos['volume_usd']:,.0f} Vol)<br>
-                    Entry: ${entry:,.2f} | Current: ${current_price:,.2f}<br>
-                    Margin PnL: <span style="color: {color}; font-weight: bold;">{sign}${pnl_usd:.2f} ({sign}{roi_pct:.1f}% ROI)</span>
+                    Margin: ${pos['margin_usd']:.2f} | Entry: ${entry:,.2f} | Current: ${current_price:,.2f}<br>
+                    PnL: <span style="color: {color}; font-weight: bold;">{sign}${pnl_usd:.2f} ({sign}{roi_pct:.1f}% ROI)</span>
                 </div>
                 <div>
                     <a href="/close?symbol={sym}" style="background: #da3633; color: white; padding: 8px 12px; text-decoration: none; border-radius: 4px; font-weight: bold; font-size: 12px;">❌ Close Now</a>
@@ -161,7 +160,7 @@ def dashboard():
     <!DOCTYPE html>
     <html>
     <head>
-        <title>Trading-blue: Optimized Risk Scalper</title>
+        <title>Trading-blue: Fully Loaded Desk</title>
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <meta http-equiv="refresh" content="2">
         <style>
@@ -174,7 +173,7 @@ def dashboard():
         </style>
     </head>
     <body>
-        <h2>⚡ Trading-blue: Optimized Risk Scalper</h2>
+        <h2>⚡ Trading-blue: Advanced Scalper (1-4 Active)</h2>
         
         <div class="card">
             <div>Virtual Equity Pool</div>
@@ -203,7 +202,7 @@ def dashboard():
 
 
 # ==========================================
-# 40X LEVERAGE OPTIMIZED ENGINE WORKER
+# ADVANCED MULTI-FEATURE ENGINE WORKER
 # ==========================================
 async def market_watcher_worker():
     async with aiohttp.ClientSession() as session:
@@ -231,7 +230,7 @@ async def market_watcher_worker():
                     await asyncio.sleep(1)
                     continue
 
-                # --- 1. AUTOMATED RISK MANAGEMENT WITH OPTIMIZED TARGETS ---
+                # --- 1. AUTOMATED RISK MANAGEMENT & RATCLIFFE RATETCH ---
                 open_symbols = list(logger.open_positions.keys())
                 for symbol in open_symbols:
                     pos = logger.open_positions[symbol]
@@ -254,20 +253,25 @@ async def market_watcher_worker():
 
                         leveraged_pnl_pct = asset_pct * LEVERAGE
 
-                        # Fast-Lock Trigger at +8% ROI
+                        # Ratchet Stage 1: Breakeven Lock at +5% ROI
+                        if not pos["stage1_locked"] and leveraged_pnl_pct >= 5.0:
+                            pos["stage1_locked"] = True
+                            await logger.log(f"{LEVERAGE}X-RATCHET", f"${symbol} {side} hit +5% ROI · Breakeven protection armed")
+
+                        # Ratchet Stage 2 (Fast-Lock): Armed at +8% ROI
                         if not pos["fast_locked"] and leveraged_pnl_pct >= FAST_LOCK_ROI:
                             pos["fast_locked"] = True
                             pos["trailing_active"] = True
-                            await logger.log(f"{LEVERAGE}X-FASTLOCK", f"${symbol} {side} hit +{leveraged_pnl_pct:.1f}% ROI · Fast-Lock Armed!")
+                            await logger.log(f"{LEVERAGE}X-FASTLOCK", f"${symbol} {side} hit +8% ROI · Fast-Lock Armed!")
 
-                        # Take-Profit Target Trigger at +15% ROI (~$3.00 profit)
+                        # Ratchet Stage 3 (Take-Profit Target): Triggered at +15% ROI
                         if not pos["trailing_active"] and leveraged_pnl_pct >= TAKE_PROFIT_ROI:
                             pos["trailing_active"] = True
-                            await logger.log(f"{LEVERAGE}X-SCALP", f"${symbol} {side} hit +{leveraged_pnl_pct:.1f}% ROI · Target Lock Active")
+                            await logger.log(f"{LEVERAGE}X-SCALP", f"${symbol} {side} hit +15% ROI · Target Lock Active")
 
                         should_close = False
                         reason = ""
-                        if leveraged_pnl_pct <= -14.0: # Hard stop cap
+                        if leveraged_pnl_pct <= -14.0:
                             should_close = True
                             reason = "hard stop (-14% ROI)"
                         elif pos["fast_locked"] and drop_from_peak >= TRAIL_DROP_PCT:
@@ -298,7 +302,7 @@ async def market_watcher_worker():
                                 alert_telegram=True,
                             )
 
-                # --- 2. ENTRY SCANNER WITH HIGH-PROBABILITY BYPASS ---
+                # --- 2. ENTRY SCANNER WITH DYNAMIC COMPOUNDING & FILTERS ---
                 if len(logger.open_positions) < MAX_OPEN_POSITIONS:
                     for symbol, current_price in live_prices.items():
                         if symbol in logger.open_positions:
@@ -318,6 +322,7 @@ async def market_watcher_worker():
                             is_in_cooldown = symbol in logger.symbol_cooldowns
                             is_high_probability = abs_momentum >= HIGH_PROB_THRESHOLD
 
+                            # Feature 2 & 3: Filter check (valid momentum + cooldown or high-prob bypass)
                             can_trade = False
                             if not is_in_cooldown and abs_momentum > 0.01:
                                 can_trade = True
@@ -327,7 +332,13 @@ async def market_watcher_worker():
                             if can_trade:
                                 chosen_side = "LONG" if momentum_pct > 0 else "SHORT"
 
-                                if logger.equity >= MARGIN_SIZE_USD and len(logger.open_positions) < MAX_OPEN_POSITIONS:
+                                # Feature 1: Dynamic Compounding Margin Size based on current equity
+                                dynamic_margin = round(logger.equity * EQUITY_ALLOCATION_PCT, 2)
+                                if dynamic_margin < 5.0: # Minimum safety floor
+                                    dynamic_margin = 5.0
+                                dynamic_volume = dynamic_margin * LEVERAGE
+
+                                if logger.equity >= dynamic_margin and len(logger.open_positions) < MAX_OPEN_POSITIONS:
                                     if symbol in logger.symbol_cooldowns:
                                         logger.symbol_cooldowns.pop(symbol, None)
 
@@ -336,15 +347,16 @@ async def market_watcher_worker():
                                         "side": chosen_side,
                                         "entry_price": current_price,
                                         "peak_price": current_price,
-                                        "margin_usd": MARGIN_SIZE_USD,
-                                        "volume_usd": POSITION_VOLUME_USD,
+                                        "margin_usd": dynamic_margin,
+                                        "volume_usd": dynamic_volume,
+                                        "stage1_locked": False,
+                                        "fast_locked": False,
                                         "trailing_active": False,
-                                    "fast_locked": False,
                                     }
                                     logger.traded_count += 1
                                     await logger.log(
                                         f"{LEVERAGE}X-SCALP",
-                                        f"OPENED {LEVERAGE}x {chosen_side} {symbol} (High-Prob Setup) · Margin: ${MARGIN_SIZE_USD:.2f} @ ${current_price:,.2f}",
+                                        f"OPENED {LEVERAGE}x {chosen_side} {symbol} (Compounded) · Margin: ${dynamic_margin:.2f} (Vol: ${dynamic_volume:,.0f}) @ ${current_price:,.2f}",
                                         alert_telegram=True,
                                     )
 
