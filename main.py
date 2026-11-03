@@ -11,26 +11,26 @@ app = FastAPI()
 # CONFIGURATION & INSTITUTIONAL PARAMETERS
 # ==========================================
 INITIAL_EQUITY = 50.00           # Starting virtual balance ($50.00)
-LEVERAGE = 40                    # 40x Leverage
-MAX_OPEN_POSITIONS = 2           # Max 2 concurrent high-leverage scalps
-COOLDOWN_HOURS = 5               # 5-hour standard cooldown for closed symbols
+LEVERAGE = 5                     # Safe 5x leverage for breathing room
+MAX_OPEN_POSITIONS = 3           # Increased max open positions to capitalize on more pairs
+COOLDOWN_HOURS = 3               # Cooldown period for closed symbols
 
-# Strategy 1: Dynamic Compounding (% of equity per trade)
-EQUITY_ALLOCATION_PCT = 0.40     # Risk 40% of current virtual equity per trade
+# Dynamic Compounding Sizing (% of equity per trade)
+EQUITY_ALLOCATION_PCT = 0.25     # Risk 25% of current virtual equity per trade (spread safer across more coins)
 
-# Strategy 2: Order Book Imbalance Threshold (Bids vs Asks volume ratio)
-MIN_BOOK_IMBALANCE = 1.3         # Requires 30% volume dominance on entry side
+# Expanded Trading Pair Universe for 5x Leverage
+TRADING_PAIRS = [
+    "BTC-USDT", "ETH-USDT", "SOL-USDT", "BNB-USDT", 
+    "XRP-USDT", "ADA-USDT", "DOGE-USDT", "AVAX-USDT", 
+    "LINK-USDT", "MATIC-USDT"
+]
 
-# Strategy 3 & High-Probability Filters
-HIGH_PROB_THRESHOLD = 0.035      # If momentum > 0.035%, bypass cooldown
-TRADING_PAIRS = ["BTC-USDT", "ETH-USDT", "SOL-USDT", "BNB-USDT", "XRP-USDT", "ADA-USDT"]
-
-# Strategy 4 & 5: Tranche Scale-Outs, Ratchets & Risk Controls
+# Risk Controls & Targets
 MAX_DAILY_DRAWDOWN_PCT = 15.0    # Circuit breaker: Halt if equity drops 15% today
-STOP_LOSS_PCT = -0.35            # Tightened hard stop (~-14% margin loss)
-FAST_LOCK_ROI = 8.0              # Tranche 1: Close 50% at +8% ROI
-TAKE_PROFIT_ROI = 15.0           # Tranche 2: Close remaining 50% at +15% ROI
-TRAIL_DROP_PCT = 0.08            # Ultra-tight drop threshold
+STOP_LOSS_PCT = -0.03            # -3% asset price stop-loss (~-15% margin loss at 5x)
+FAST_LOCK_ROI = 10.0             # Tranche 1: Close 50% at +10% ROI
+TAKE_PROFIT_ROI = 25.0           # Tranche 2: Close remaining 50% at +25% ROI
+TRAIL_DROP_PCT = 0.015           # Trailing drop threshold
 
 # Telegram Credentials
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -107,7 +107,7 @@ async def manual_close(symbol: str = Query(...)):
         sign = "+" if pnl_usd >= 0 else ""
         await logger.log(
             "MANUAL",
-            f"CLOSED 4x {side} {symbol} manually · {sign}${pnl_usd:.2f} USDT | Cooldown: 5h | Equity: ${logger.equity:.2f}",
+            f"CLOSED {LEVERAGE}x {side} {symbol} manually · {sign}${pnl_usd:.2f} USDT | Cooldown: 3h | Equity: ${logger.equity:.2f}",
             alert_telegram=True,
         )
 
@@ -158,7 +158,7 @@ def dashboard():
             </div>
             """
     else:
-        positions_html = f"<i>No open {LEVERAGE}x scalps. Scanning markets...</i>"
+        positions_html = f"<i>No open {LEVERAGE}x positions. Scanning {len(TRADING_PAIRS)} markets...</i>"
 
     now = datetime.now()
     active_cooldowns = [sym for sym, exp in logger.symbol_cooldowns.items() if exp > now]
@@ -169,7 +169,7 @@ def dashboard():
     <!DOCTYPE html>
     <html>
     <head>
-        <title>Trading-blue: Fully Loaded Desk</title>
+        <title>Trading-blue: Multi-Pair 5x Desk</title>
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <meta http-equiv="refresh" content="2">
         <style>
@@ -182,7 +182,7 @@ def dashboard():
         </style>
     </head>
     <body>
-        <h2>⚡ Trading-blue: Professional Quantitative Desk</h2>
+        <h2>⚡ Trading-blue: Multi-Pair 5x Desk</h2>
         
         <div class="card">
             <div>Virtual Equity Pool | Status: {halt_status}</div>
@@ -191,17 +191,17 @@ def dashboard():
 
         <div class="card">
             <div>Bot Stats</div>
-            <div>Scanned Ticks: <b>{logger.scanned_count}</b> | Traded: <b>{logger.traded_count}</b></div>
+            <div>Scanned Ticks: <b>{logger.scanned_count}</b> | Traded: <b>{logger.traded_count}</b> | Active Pairs: <b>{len(TRADING_PAIRS)}</b></div>
             <div style="margin-top: 8px; font-size: 13px; color: #8b949e;">{cooldowns_text}</div>
         </div>
 
         <div class="card">
-            <div>Active {LEVERAGE}x Scalps ({len(logger.open_positions)}/{MAX_OPEN_POSITIONS})</div>
+            <div>Active {LEVERAGE}x Positions ({len(logger.open_positions)}/{MAX_OPEN_POSITIONS})</div>
             <div style="margin-top: 10px;">{positions_html}</div>
         </div>
 
         <div class="card">
-            <div>Live Scalp Logs (Auto-refreshes every 2s)</div>
+            <div>Live Desk Logs (Auto-refreshes every 2s)</div>
             <ul>{logs_html if logs_html else f"<li>Initializing scanner...</li>"}</ul>
         </div>
     </body>
@@ -233,32 +233,30 @@ async def market_watcher_worker():
 
                 logger.symbol_cooldowns = {sym: exp for sym, exp in logger.symbol_cooldowns.items() if exp > now}
 
-                live_market_data = {}
+                live_prices = {}
                 for symbol in TRADING_PAIRS:
                     url = f"https://api.kucoin.com/api/v1/market/orderbook/level1?symbol={symbol}"
-                    async with session.get(url, timeout=2.5) as resp:
+                    async with session.get(url, timeout=2.0) as resp:
                         if resp.status == 200:
                             data = await resp.json()
                             if data.get("code") == "200000" and data.get("data"):
                                 price_str = data["data"].get("price")
-                                size_str = data["data"].get("size")
                                 if price_str:
                                     price = float(price_str)
-                                    size = float(size_str) if size_str else 1.0
-                                    live_market_data[symbol] = {"price": price, "size": size}
+                                    live_prices[symbol] = price
                                     logger.latest_prices[symbol] = price
                                     logger.scanned_count += 1
-                    asyncio.sleep(0.05)
+                    await asyncio.sleep(0.02) # Faster iteration across more pairs
 
-                if not live_market_data:
+                if not live_prices:
                     await asyncio.sleep(1)
                     continue
 
-                # --- 1. MANAGING ACTIVE POSITIONS WITH TRANCHE SCALE-OUTS ---
+                # --- 1. MANAGING POSITIONS WITH TRANCHE SCALE-OUTS & STOP LOSS ---
                 open_symbols = list(logger.open_positions.keys())
                 for symbol in open_symbols:
                     pos = logger.open_positions[symbol]
-                    current_price = logger.latest_prices.get(symbol, 0)
+                    current_price = live_prices.get(symbol, 0)
                     
                     if current_price > 0:
                         entry = pos["entry_price"]
@@ -277,7 +275,7 @@ async def market_watcher_worker():
 
                         leveraged_pnl_pct = asset_pct * LEVERAGE
 
-                        # Tranche 1 Scale-Out (50% profit secure at +8% ROI)
+                        # Tranche 1 Scale-Out (50% profit secure at +10% ROI)
                         if not pos["tranche1_taken"] and leveraged_pnl_pct >= FAST_LOCK_ROI:
                             pos["tranche1_taken"] = True
                             half_margin = pos["margin_usd"] * 0.5
@@ -287,7 +285,7 @@ async def market_watcher_worker():
                             partial_pnl = partial_return - half_margin
                             logger.equity += partial_pnl
                             
-                            pos["margin_usd"] -= half_margin # Reduce remaining exposure by half
+                            pos["margin_usd"] -= half_margin
                             pos["volume_usd"] *= 0.5
 
                             await logger.log(
@@ -298,12 +296,12 @@ async def market_watcher_worker():
 
                         should_close = False
                         reason = ""
-                        if leveraged_pnl_pct <= -14.0:
+                        if asset_pct <= (STOP_LOSS_PCT * 100):
                             should_close = True
-                            reason = "hard stop (-14% ROI)"
+                            reason = f"hard stop ({STOP_LOSS_PCT*100}% move)"
                         elif pos["tranche1_taken"] and drop_from_peak >= TRAIL_DROP_PCT:
                             should_close = True
-                            reason = f"Tranche 2 residual profit secured (+{leveraged_pnl_pct:.1f}% ROI)"
+                            reason = f"Residual profit secured (+{leveraged_pnl_pct:.1f}% ROI)"
                         elif leveraged_pnl_pct >= TAKE_PROFIT_ROI:
                             should_close = True
                             reason = f"Full Target Reached (>={TAKE_PROFIT_ROI}% ROI)"
@@ -324,44 +322,33 @@ async def market_watcher_worker():
 
                             sign = "+" if pnl_usd >= 0 else ""
                             await logger.log(
-                                f"{LEVERAGE}X-SCALP",
-                                f"CLOSED final {LEVERAGE}x {side} {symbol} {reason} · {sign}${pnl_usd:.2f} USDT | Cooldown: 5h | Equity: ${logger.equity:.2f}",
+                                f"{LEVERAGE}X-DESK",
+                                f"CLOSED {LEVERAGE}x {side} {symbol} {reason} · {sign}${pnl_usd:.2f} USDT | Cooldown: 3h | Equity: ${logger.equity:.2f}",
                                 alert_telegram=True,
                             )
 
-                # --- 2. MASTER ENTRY SCANNER (ORDER BOOK IMBALANCE + TREND + COMPOUNDING) ---
+                # --- 2. MASTER ENTRY SCANNER (MULTI-PAIR SCAN) ---
                 if not logger.trading_halted and len(logger.open_positions) < MAX_OPEN_POSITIONS:
-                    for symbol, market_info in live_market_data.items():
+                    for symbol, current_price in live_prices.items():
                         if symbol in logger.open_positions:
                             continue
 
-                        current_price = market_info["price"]
-                        current_size = market_info["size"]
-
                         history = logger.price_histories[symbol]
                         history.append(current_price)
-                        if len(history) > 3:
+                        if len(history) > 5:
                             history.pop(0)
 
-                        if len(history) >= 3:
+                        if len(history) >= 5:
                             price_start = history[0]
                             price_end = history[-1]
                             momentum_pct = ((price_end - price_start) / price_start) * 100
                             abs_momentum = abs(momentum_pct)
 
                             is_in_cooldown = symbol in logger.symbol_cooldowns
-                            is_high_probability = abs_momentum >= HIGH_PROB_THRESHOLD
-
-                            can_trade = False
-                            if not is_in_cooldown and abs_momentum > 0.01:
-                                can_trade = True
-                            elif is_in_cooldown and is_high_probability:
-                                can_trade = True
-
-                            if can_trade:
+                            
+                            if not is_in_cooldown and abs_momentum >= 0.02:
                                 chosen_side = "LONG" if momentum_pct > 0 else "SHORT"
 
-                                # Order Book Imbalance / Size Filter check
                                 baseline_price = sum(history) / len(history)
                                 if chosen_side == "LONG" and current_price < baseline_price:
                                     continue
@@ -388,8 +375,8 @@ async def market_watcher_worker():
                                     }
                                     logger.traded_count += 1
                                     await logger.log(
-                                        f"{LEVERAGE}X-SCALP",
-                                        f"OPENED {LEVERAGE}x {chosen_side} {symbol} (Pro Quant) · Margin: ${dynamic_margin:.2f} @ ${current_price:,.2f}",
+                                        f"{LEVERAGE}X-DESK",
+                                        f"OPENED {LEVERAGE}x {chosen_side} {symbol} (Multi-Pair) · Margin: ${dynamic_margin:.2f} @ ${current_price:,.2f}",
                                         alert_telegram=True,
                                     )
 
